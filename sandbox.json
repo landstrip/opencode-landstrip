@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "network": {
+    "allowLocalBinding": true,
+    "allowAllUnixSockets": false,
+    "allowUnixSockets": [],
+    "allowedDomains": [
+      "github.com",
+      "*.github.com",
+      "raw.githubusercontent.com",
+      "registry.npmjs.org",
+      "*.npmjs.org",
+      "crates.io",
+      "*.crates.io",
+      "static.crates.io"
+    ],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": ["/home"],
+    "allowRead": [".", "~/.config/opencode", "~/.local", "~/.cargo"],
+    "allowWrite": [".", "/tmp", "~/.cargo", "~/.rustup"],
+    "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
+  }
+}

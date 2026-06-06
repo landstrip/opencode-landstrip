@@ -1,0 +1,60 @@
+{
+  "name": "opencode-landstrip",
+  "version": "0.1.0",
+  "description": "Landlock-based sandboxing for opencode with landstrip",
+  "keywords": [
+    "landlock",
+    "landstrip",
+    "opencode-plugin",
+    "sandbox"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jarkkojs/opencode-landstrip.git"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "sandbox.json"
+  ],
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": {
+      "import": "./index.ts",
+      "types": "./index.ts"
+    },
+    "./server": {
+      "import": "./index.ts",
+      "types": "./index.ts"
+    }
+  },
+  "scripts": {
+    "fmt": "oxfmt index.ts package.json tsconfig.json sandbox.json .oxfmtrc.json README.md",
+    "lint": "oxlint index.ts",
+    "check": "tsc --noEmit",
+    "all": "npm run fmt && npm run lint && npm run check",
+    "ci:fmt": "oxfmt --check index.ts package.json tsconfig.json sandbox.json .oxfmtrc.json README.md",
+    "ci:lint": "npm run lint",
+    "ci:check": "npm run check"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.16.2",
+    "@types/node": "^24.0.0",
+    "oxfmt": "^0.53.0",
+    "oxlint": "^1.68.0",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.16.2"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "opencode": ">=1.16.2"
+  }
+}
