@@ -35,10 +35,22 @@ test('bash wrapping is idempotent for repeated before hooks', async () => {
     await writeFile(
       fakeLandstrip,
       process.platform === 'win32'
-        ? '@echo landstrip 0.8.3\r\n'
-        : '#!/bin/sh\nprintf "landstrip 0.8.3\\n"\n',
+        ? '@echo landstrip 0.9.2\r\n'
+        : '#!/bin/sh\nprintf "landstrip 0.9.2\\n"\n',
     );
     if (process.platform !== 'win32') await chmod(fakeLandstrip, 0o755);
+
+    // Create a mock @jarkkojs/landstrip package in the temp directory
+    const landstripMockDir = join(tempDir, 'node_modules', '@jarkkojs', 'landstrip');
+    await mkdir(landstripMockDir, { recursive: true });
+    await writeFile(
+      join(landstripMockDir, 'package.json'),
+      JSON.stringify({ name: '@jarkkojs/landstrip', type: 'module', main: './index.mjs' }),
+    );
+    await writeFile(
+      join(landstripMockDir, 'index.mjs'),
+      `export function binaryPath() { return ${JSON.stringify(fakeLandstrip)}; }`,
+    );
 
     const { default: plugin } = await import(pathToFileURL(modulePath).href);
     const messages = [];
@@ -62,7 +74,6 @@ test('bash wrapping is idempotent for repeated before hooks', async () => {
           denyRead: [],
           denyWrite: [],
         },
-        landstrip: { command: fakeLandstrip },
         network: { allowedDomains: ['*'], deniedDomains: [] },
       },
     );

@@ -3,6 +3,8 @@
 
 import type { Hooks, Plugin, PluginInput, PluginOptions } from '@opencode-ai/plugin';
 
+import { binaryPath } from '@jarkkojs/landstrip';
+
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -32,16 +34,10 @@ interface SandboxNetworkConfig {
   deniedDomains: string[];
 }
 
-interface LandstripConfig {
-  command: string;
-  debug: boolean;
-}
-
 interface SandboxConfig {
   enabled: boolean;
   network: SandboxNetworkConfig;
   filesystem: SandboxFilesystemConfig;
-  landstrip: LandstripConfig;
 }
 
 interface LandstripPolicy {
@@ -54,11 +50,19 @@ interface LandstripPolicy {
   filesystem: SandboxFilesystemConfig;
 }
 
+interface LandstripErrorResponse {
+  category: 'policy' | 'tool' | 'platform' | 'system';
+  file?: string;
+  program?: string;
+  target?: 'filesystem' | 'network' | 'platform';
+  kind?: 'launch' | 'encoding';
+  message: string;
+}
+
 interface SandboxConfigOverrides {
   enabled?: boolean;
   network?: Partial<SandboxNetworkConfig>;
   filesystem?: Partial<SandboxFilesystemConfig>;
-  landstrip?: Partial<LandstripConfig>;
 }
 
 interface BashSandboxState {
@@ -71,7 +75,7 @@ interface BashSandboxState {
 
 type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 
-const LANDSTRIP_VERSION = [0, 8, 3] as const;
+const LANDSTRIP_VERSION = [0, 9, 2] as const;
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
 const DEFAULT_CONFIG: SandboxConfig = {
@@ -102,10 +106,6 @@ const DEFAULT_CONFIG: SandboxConfig = {
     allowRead: ['.', '~/.config/opencode', '~/.config/git', '~/.gitconfig', '~/.local', '~/.cargo'],
     allowWrite: ['.', '/tmp'],
     denyWrite: ['.env', '.env.*', '*.pem', '*.key'],
-  },
-  landstrip: {
-    command: 'landstrip',
-    debug: false,
   },
 };
 
@@ -158,15 +158,6 @@ function normalizeFilesystemConfig(value: unknown): Partial<SandboxFilesystemCon
   return config;
 }
 
-function normalizeLandstripConfig(value: unknown): Partial<LandstripConfig> | undefined {
-  if (!isRecord(value)) return undefined;
-
-  const config: Partial<LandstripConfig> = {};
-  if (typeof value.command === 'string') config.command = value.command;
-  if (typeof value.debug === 'boolean') config.debug = value.debug;
-  return config;
-}
-
 function normalizeConfig(value: unknown): SandboxConfigOverrides {
   if (!isRecord(value)) return {};
 
@@ -178,9 +169,6 @@ function normalizeConfig(value: unknown): SandboxConfigOverrides {
 
   const filesystem = normalizeFilesystemConfig(value.filesystem);
   if (filesystem) config.filesystem = filesystem;
-
-  const landstrip = normalizeLandstripConfig(value.landstrip);
-  if (landstrip) config.landstrip = landstrip;
 
   return config;
 }
@@ -200,10 +188,6 @@ function deepMerge(base: SandboxConfig, overrides: SandboxConfigOverrides): Sand
     filesystem: {
       ...base.filesystem,
       ...overrides.filesystem,
-    },
-    landstrip: {
-      ...base.landstrip,
-      ...overrides.landstrip,
     },
   };
 }
@@ -364,8 +348,8 @@ function firstBlockedDomain(
   return null;
 }
 
-function landstripVersion(command: string): string | null {
-  const result = spawnSync(command, ['--version'], { encoding: 'utf-8' });
+function landstripVersion(): string | null {
+  const result = spawnSync(binaryPath(), ['--version'], { encoding: 'utf-8' });
   if (result.status !== 0) return null;
   return result.stdout.trim();
 }
@@ -386,6 +370,52 @@ function hasMinimumVersion(version: string, minimum: readonly [number, number, n
   }
 
   return true;
+}
+
+function parseLandstripErrors(output: string): LandstripErrorResponse[] {
+  const errors: LandstripErrorResponse[] = [];
+
+  for (const line of output.split('\n')) {
+    try {
+      const parsed = JSON.parse(line);
+
+      if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        typeof parsed.category === 'string' &&
+        ['policy', 'tool', 'platform', 'system'].includes(parsed.category) &&
+        typeof parsed.message === 'string' &&
+        parsed.message.length > 0
+      ) {
+        errors.push(parsed as LandstripErrorResponse);
+      }
+    } catch {
+      // ignore non-JSON lines
+    }
+  }
+
+  return errors;
+}
+
+function formatLandstripErrors(errors: LandstripErrorResponse[]): string {
+  return errors
+    .map((err) => {
+      const parts: string[] = [`landstrip: ${err.category}`];
+
+      if (err.target) {
+        parts.push(`(${err.target})`);
+      }
+      if (err.program) {
+        parts.push(` ${err.program}`);
+      }
+      if (err.kind) {
+        parts.push(`:${err.kind}`);
+      }
+      parts.push(`: ${err.message}`);
+
+      return parts.join('');
+    })
+    .join('\n');
 }
 
 function splitHostPort(target: string, defaultPort: number): { host: string; port: number } | null {
@@ -606,26 +636,15 @@ function shellArgs(shell: string, command: string): string[] {
   return [shell, '-lc', command];
 }
 
-function buildWrappedCommand(
-  config: SandboxConfig,
-  policyPath: string,
-  shell: string,
-  command: string,
-): string {
-  const args = [
-    config.landstrip.command,
-    ...(config.landstrip.debug ? ['--debug'] : []),
-    '-p',
-    policyPath,
-    ...shellArgs(shell, command),
-  ];
+function buildWrappedCommand(policyPath: string, shell: string, command: string): string {
+  const args = ['-p', policyPath, ...shellArgs(shell, command)];
 
-  return args.map(shellQuote).join(' ');
+  return [binaryPath(), ...args].map(shellQuote).join(' ');
 }
 
-function isGeneratedWrappedCommand(config: SandboxConfig, command: string): boolean {
+function isGeneratedWrappedCommand(command: string): boolean {
   return (
-    command.startsWith(`${shellQuote(config.landstrip.command)} `) &&
+    command.startsWith(`${shellQuote(binaryPath())} `) &&
     command.includes(` ${shellQuote('-p')} `) &&
     command.includes('opencode-landstrip-')
   );
@@ -710,10 +729,7 @@ export default (async ({ client, directory }: PluginInput, options?: PluginOptio
   const notified = new Set<string>();
   let enabledNotified = false;
   let configuredShell: string | undefined;
-  let landstripCheck:
-    | { command: string; ok: true; version: string }
-    | { command: string; ok: false; reason: string }
-    | undefined;
+  let landstripCheck: { ok: true; version: string } | { ok: false; reason: string } | undefined;
 
   async function notifyOnce(key: string, message: string, variant: ToastVariant): Promise<void> {
     if (notified.has(key)) return;
@@ -738,38 +754,35 @@ export default (async ({ client, directory }: PluginInput, options?: PluginOptio
       .catch(() => undefined);
   }
 
-  function checkLandstrip(config: SandboxConfig): typeof landstripCheck {
-    if (landstripCheck?.command === config.landstrip.command) return landstripCheck;
+  function checkLandstrip(): typeof landstripCheck {
+    if (landstripCheck) return landstripCheck;
 
     if (!SUPPORTED_PLATFORMS.has(process.platform)) {
       landstripCheck = {
-        command: config.landstrip.command,
         ok: false,
         reason: `landstrip sandboxing is not supported on ${process.platform}`,
       };
       return landstripCheck;
     }
 
-    const version = landstripVersion(config.landstrip.command);
+    const version = landstripVersion();
     if (!version) {
       landstripCheck = {
-        command: config.landstrip.command,
         ok: false,
-        reason: `landstrip was not found. Install it with: cargo install landstrip`,
+        reason: `landstrip was not found. Reinstall with: npm install @jarkkojs/landstrip`,
       };
       return landstripCheck;
     }
 
     if (!hasMinimumVersion(version, LANDSTRIP_VERSION)) {
       landstripCheck = {
-        command: config.landstrip.command,
         ok: false,
-        reason: `landstrip 0.8.3 or newer is required; found: ${version}`,
+        reason: `landstrip 0.9.2 or newer is required; found: ${version}`,
       };
       return landstripCheck;
     }
 
-    landstripCheck = { command: config.landstrip.command, ok: true, version };
+    landstripCheck = { ok: true, version };
     return landstripCheck;
   }
 
@@ -777,7 +790,7 @@ export default (async ({ client, directory }: PluginInput, options?: PluginOptio
     const config = loadConfig(directory, optionOverrides);
     if (!config.enabled) return null;
 
-    const check = checkLandstrip(config);
+    const check = checkLandstrip();
     if (!check?.ok) {
       await notifyOnce(
         `disabled:${check?.reason ?? 'unknown'}`,
@@ -837,7 +850,7 @@ export default (async ({ client, directory }: PluginInput, options?: PluginOptio
       await cleanupBash(callID);
     }
 
-    if (isGeneratedWrappedCommand(config, args.command)) {
+    if (isGeneratedWrappedCommand(args.command)) {
       if (typeof args.description === 'string')
         args.description = landstripDescription(args.description);
       return;
@@ -867,7 +880,6 @@ export default (async ({ client, directory }: PluginInput, options?: PluginOptio
 
     const originalCommand = args.command;
     const wrappedCommand = buildWrappedCommand(
-      config,
       policy.path,
       configuredShell ?? process.env.SHELL ?? '/bin/sh',
       originalCommand,

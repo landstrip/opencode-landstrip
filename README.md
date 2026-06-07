@@ -3,17 +3,6 @@
 Landlock-based sandboxing for [opencode](https://opencode.ai/) using
 [`landstrip`](https://github.com/jarkkojs/landstrip).
 
-## Prerequisites
-
-Install `landstrip` and make sure it is on the `PATH` used to launch opencode:
-
-```bash
-cargo install landstrip
-```
-
-`landstrip` supports Linux, macOS, and Windows. On other platforms this plugin
-loads but leaves sandboxing disabled.
-
 ## Install
 
 Add the plugin to `opencode.json`:
@@ -24,6 +13,11 @@ Add the plugin to `opencode.json`:
   "plugin": ["opencode-landstrip"]
 }
 ```
+
+This installs `opencode-landstrip` and its `@jarkkojs/landstrip` dependency, which
+includes platform-specific native binaries for Linux, macOS, and Windows.
+
+On unsupported platforms the plugin loads but leaves sandboxing disabled.
 
 ## Configure
 
