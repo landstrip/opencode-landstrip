@@ -75,7 +75,7 @@ interface BashSandboxState {
 
 type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 
-const LANDSTRIP_VERSION = [0, 9, 5] as const;
+const LANDSTRIP_VERSION = [0, 9, 7] as const;
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
 const DEFAULT_CONFIG: SandboxConfig = {
@@ -777,7 +777,7 @@ export default (async ({ client, directory }: PluginInput, options?: PluginOptio
     if (!hasMinimumVersion(version, LANDSTRIP_VERSION)) {
       landstripCheck = {
         ok: false,
-        reason: `landstrip 0.9.5 or newer is required; found: ${version}`,
+        reason: `landstrip 0.9.7 or newer is required; found: ${version}`,
       };
       return landstripCheck;
     }
