@@ -47,6 +47,7 @@ interface SandboxFilesystemConfig {
 }
 
 interface SandboxNetworkConfig {
+  allowNetwork: boolean;
   allowLocalBinding: boolean;
   allowAllUnixSockets: boolean;
   allowUnixSockets: string[];
@@ -62,10 +63,11 @@ interface SandboxConfig {
 
 interface LandstripPolicy {
   network: {
+    allowNetwork: boolean;
     allowLocalBinding: boolean;
     allowAllUnixSockets: boolean;
     allowUnixSockets: string[];
-    httpProxyPort: number;
+    httpProxyPort?: number;
   };
   filesystem: SandboxFilesystemConfig;
 }
@@ -78,12 +80,13 @@ interface LandstripErrorResponse {
   message: string;
 }
 
-const LANDSTRIP_VERSION = [0, 9, 5] as const;
+const LANDSTRIP_VERSION = [0, 9, 7] as const;
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
 const DEFAULT_CONFIG: SandboxConfig = {
   enabled: true,
   network: {
+    allowNetwork: false,
     allowLocalBinding: false,
     allowAllUnixSockets: false,
     allowUnixSockets: [],
@@ -694,15 +697,16 @@ export function createLandstripIntegration(
     return true;
   }
 
-  function buildLandstripPolicy(cwd: string, proxyPort: number): LandstripPolicy {
+  function buildLandstripPolicy(cwd: string, proxyPort: number | null): LandstripPolicy {
     const config = loadConfig(cwd);
 
     return {
       network: {
+        allowNetwork: config.network.allowNetwork,
         allowLocalBinding: config.network.allowLocalBinding,
         allowAllUnixSockets: config.network.allowAllUnixSockets,
         allowUnixSockets: config.network.allowUnixSockets,
-        httpProxyPort: proxyPort,
+        ...(proxyPort !== null ? { httpProxyPort: proxyPort } : {}),
       },
       filesystem: {
         denyRead: config.filesystem.denyRead,
@@ -713,7 +717,7 @@ export function createLandstripIntegration(
     };
   }
 
-  function writePolicyFile(cwd: string, proxyPort: number): { dir: string; path: string } {
+  function writePolicyFile(cwd: string, proxyPort: number | null): { dir: string; path: string } {
     const dir = mkdtempSync(join(tmpdir(), 'pi-landstrip-'));
     const path = join(dir, 'policy.json');
     writeFileSync(
@@ -858,8 +862,11 @@ export function createLandstripIntegration(
         if (!existsSync(cwd)) throw new Error(`Working directory does not exist: ${cwd}`);
 
         const { shell, args } = getShellConfig(SettingsManager.create(cwd).getShellPath());
-        const proxy = await startProxy(ctx, cwd);
-        const policy = writePolicyFile(cwd, proxy.port);
+        const config = loadConfig(cwd);
+        const allowNetwork = config.network.allowNetwork;
+        const proxy = allowNetwork ? null : await startProxy(ctx, cwd);
+        const proxyPort = proxy ? proxy.port : null;
+        const policy = writePolicyFile(cwd, proxyPort);
         const landstripArgs = ['-p', policy.path, shell, ...args, command];
 
         return new Promise((resolvePromise, reject) => {
@@ -872,13 +879,13 @@ export function createLandstripIntegration(
             cleaned = true;
             if (timeoutHandle) clearTimeout(timeoutHandle);
             signal?.removeEventListener('abort', onAbort);
-            void proxy.stop();
+            void proxy?.stop();
             rmSync(policy.dir, { recursive: true, force: true });
           };
 
           const child = spawn(binaryPath(), landstripArgs, {
             cwd,
-            env: proxyEnv(env, proxy.port),
+            env: allowNetwork ? { ...process.env, ...env } : proxyEnv(env, proxy!.port),
             detached: true,
             stdio: ['ignore', 'pipe', 'pipe'],
           });
@@ -1005,6 +1012,10 @@ export function createLandstripIntegration(
   }
 
   function warnIfAllDomainsAllowed(ctx: ExtensionContext, config: SandboxConfig): void {
+    if (config.network.allowNetwork) {
+      ctx.ui.notify('Network sandbox is disabled because network.allowNetwork is true.', 'warning');
+      return;
+    }
     if (!allowsAllDomains(config.network.allowedDomains)) return;
     ctx.ui.notify(
       'Network sandbox allows all domains because network.allowedDomains contains "*".',
@@ -1013,9 +1024,11 @@ export function createLandstripIntegration(
   }
 
   function enableStatus(ctx: ExtensionContext, config: SandboxConfig): void {
-    const networkLabel = allowsAllDomains(config.network.allowedDomains)
-      ? 'all domains'
-      : `${config.network.allowedDomains.length} domains`;
+    const networkLabel = config.network.allowNetwork
+      ? 'unrestricted'
+      : allowsAllDomains(config.network.allowedDomains)
+        ? 'all domains'
+        : `${config.network.allowedDomains.length} domains`;
     ctx.ui.setStatus(
       'sandbox',
       ctx.ui.theme.fg(
@@ -1049,7 +1062,7 @@ export function createLandstripIntegration(
     if (!hasMinimumVersion(version, LANDSTRIP_VERSION)) {
       sandboxEnabled = false;
       sandboxReady = false;
-      ctx.ui.notify(`landstrip 0.9.5 or newer is required; found: ${version}`, 'error');
+      ctx.ui.notify(`landstrip 0.9.7 or newer is required; found: ${version}`, 'error');
       return false;
     }
 
@@ -1093,18 +1106,21 @@ export function createLandstripIntegration(
 
     pi.on('user_bash', async (event, ctx) => {
       if (!sandboxEnabled || !sandboxReady) return;
-      if (!loadConfig(ctx.cwd).enabled) return;
+      const config = loadConfig(ctx.cwd);
+      if (!config.enabled) return;
 
-      const blockedDomain = await preflightCommandDomains(event.command, ctx);
-      if (blockedDomain) {
-        return {
-          result: {
-            output: `Blocked: "${blockedDomain}" is not allowed by the sandbox. Use /sandbox to review your config.`,
-            exitCode: 1,
-            cancelled: false,
-            truncated: false,
-          },
-        };
+      if (!config.network.allowNetwork) {
+        const blockedDomain = await preflightCommandDomains(event.command, ctx);
+        if (blockedDomain) {
+          return {
+            result: {
+              output: `Blocked: "${blockedDomain}" is not allowed by the sandbox. Use /sandbox to review your config.`,
+              exitCode: 1,
+              cancelled: false,
+              truncated: false,
+            },
+          };
+        }
       }
 
       return { operations: createLandstripBashOps(ctx) };
@@ -1119,12 +1135,14 @@ export function createLandstripIntegration(
       const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
 
       if (sandboxReady && isToolCallEventType('bash', event)) {
-        const blockedDomain = await preflightCommandDomains(event.input.command, ctx);
-        if (blockedDomain) {
-          return {
-            block: true,
-            reason: `Network access to "${blockedDomain}" is blocked by the sandbox.`,
-          };
+        if (!config.network.allowNetwork) {
+          const blockedDomain = await preflightCommandDomains(event.input.command, ctx);
+          if (blockedDomain) {
+            return {
+              block: true,
+              reason: `Network access to "${blockedDomain}" is blocked by the sandbox.`,
+            };
+          }
         }
       }
 
@@ -1231,7 +1249,8 @@ export function createLandstripIntegration(
           `  Global config:  ${globalPath}`,
           `  landstrip:      ${binaryPath()}`,
           '',
-          'Network (bash through HTTP proxy):',
+          `Network (bash ${config.network.allowNetwork ? 'unrestricted' : 'through HTTP proxy'}):`,
+          `  Allow network:  ${config.network.allowNetwork}`,
           `  Allowed domains: ${config.network.allowedDomains.join(', ') || '(none)'}`,
           `  Denied domains:  ${config.network.deniedDomains.join(', ') || '(none)'}`,
           ...(sessionAllowedDomains.length > 0
