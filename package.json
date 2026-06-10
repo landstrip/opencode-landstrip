@@ -15,6 +15,7 @@
   },
   "files": [
     "index.ts",
+    "tui.ts",
     "README.md",
     "sandbox.json"
   ],
@@ -28,15 +29,19 @@
     "./server": {
       "import": "./index.ts",
       "types": "./index.ts"
+    },
+    "./tui": {
+      "import": "./tui.ts",
+      "types": "./tui.ts"
     }
   },
   "scripts": {
-    "fmt": "oxfmt index.ts package.json tsconfig.json sandbox.json .oxfmtrc.json README.md test/*.test.mjs",
-    "lint": "oxlint index.ts",
+    "fmt": "oxfmt index.ts tui.ts package.json tsconfig.json sandbox.json .oxfmtrc.json README.md test/*.test.mjs",
+    "lint": "oxlint index.ts tui.ts",
     "check": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
     "all": "npm run fmt && npm run lint && npm run check && npm test",
-    "ci:fmt": "oxfmt --check index.ts package.json tsconfig.json sandbox.json .oxfmtrc.json README.md test/*.test.mjs",
+    "ci:fmt": "oxfmt --check index.ts tui.ts package.json tsconfig.json sandbox.json .oxfmtrc.json README.md test/*.test.mjs",
     "ci:lint": "npm run lint",
     "ci:check": "npm run check",
     "ci:test": "npm test"
@@ -46,6 +51,9 @@
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.16.2",
+    "@opentui/core": ">=0.3.2",
+    "@opentui/keymap": ">=0.3.2",
+    "@opentui/solid": ">=0.3.2",
     "@types/node": "^24.0.0",
     "oxfmt": "^0.53.0",
     "oxlint": "^1.68.0",
