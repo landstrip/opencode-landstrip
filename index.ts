@@ -337,12 +337,30 @@ function normalizeBlockedPath(path: string, cwd: string): string {
   return canonicalizePath(isAbsolute(path) ? path : join(cwd, path));
 }
 
-function extractBlockedWritePath(output: string, cwd: string): string | null {
-  const match = output.match(
+function extractBlockedPath(output: string, cwd: string): string | null {
+  // bash/sh: line X: /path: Permission denied
+  let match = output.match(
     /(?:\/bin\/bash|bash|sh): (?:line \d+: )?([^:\n]+): (?:Operation not permitted|Permission denied)/,
   );
+  if (match) return normalizeBlockedPath(match[1], cwd);
 
-  return match ? normalizeBlockedPath(match[1], cwd) : null;
+  // ls/cat/cp: cannot open/access/stat '/path': Permission denied
+  match = output.match(
+    /^[a-zA-Z0-9_-]+: cannot (?:open|access|stat|create)(?: directory)? '?([^'\n]+?)'?(?: for (?:reading|writing))?: Permission denied$/m,
+  );
+  if (match) return normalizeBlockedPath(match[1], cwd);
+
+  // Generic: cmd: /absolute/path: Permission denied or Operation not permitted
+  match = output.match(
+    /^[a-zA-Z0-9_-]+: (\/[^\n:]+): (?:Operation not permitted|Permission denied)$/m,
+  );
+  if (match) return normalizeBlockedPath(match[1], cwd);
+
+  return null;
+}
+
+function extractBlockedWritePath(output: string, cwd: string): string | null {
+  return extractBlockedPath(output, cwd);
 }
 
 function parseLandstripErrors(output: string): LandstripErrorResponse[] {
@@ -993,9 +1011,11 @@ export function createLandstripIntegration(
           }
 
           signal?.addEventListener('abort', onAbort, { once: true });
+          let stderrAcc = '';
 
           child.stdout?.on('data', onData);
           child.stderr?.on('data', (data: Buffer) => {
+            stderrAcc += data.toString('utf8');
             onStderr(data);
             onData(data);
           });
@@ -1005,15 +1025,37 @@ export function createLandstripIntegration(
             reject(error);
           });
 
-          child.on('close', (code) => {
+          child.on('close', async (code) => {
             cleanup();
             if (signal?.aborted) {
               reject(new Error('aborted'));
-            } else if (timedOut) {
-              reject(new Error(`timeout:${timeout}`));
-            } else {
-              resolvePromise({ exitCode: code });
+              return;
             }
+            if (timedOut) {
+              reject(new Error(`timeout:${timeout}`));
+              return;
+            }
+
+            const blockedPath = extractBlockedPath(stderrAcc, cwd);
+            if (blockedPath && ctx.hasUI) {
+              const config = loadConfig(cwd);
+              const isReadAllowed = matchesPattern(blockedPath, getEffectiveAllowRead(cwd));
+              const isWriteAllowed = !shouldPromptForWrite(
+                blockedPath,
+                getEffectiveAllowWrite(cwd),
+                matchesPattern,
+              );
+
+              if (!isReadAllowed) {
+                const choice = await promptReadBlock(ctx, blockedPath);
+                if (choice !== 'abort') await applyReadChoice(choice, blockedPath, cwd);
+              } else if (!isWriteAllowed) {
+                const choice = await promptWriteBlock(ctx, blockedPath);
+                if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
+              }
+            }
+
+            resolvePromise({ exitCode: code });
           });
         });
       },
@@ -1370,7 +1412,11 @@ export function createLandstripIntegration(
                 // Status
                 const statusDot = theme.fg('success', '●');
                 const pathSnippet = text(truncateToWidth(binaryPath(), Math.max(20, innerW - 27)));
-                lines.push(row(`  ${statusDot} ${text('Active')}  ${dim('·')}  ${muted('landstrip:')} ${pathSnippet}`));
+                lines.push(
+                  row(
+                    `  ${statusDot} ${text('Active')}  ${dim('·')}  ${muted('landstrip:')} ${pathSnippet}`,
+                  ),
+                );
 
                 // Config files
                 lines.push(row(`  ${dim('Config files:')}`));
@@ -1382,13 +1428,29 @@ export function createLandstripIntegration(
                 lines.push(row(`${'─'.repeat(innerW)}`));
                 const netMode = config.network.allowNetwork ? ' (unrestricted)' : ' (proxied)';
                 lines.push(row(`  ${accent('Network')}${dim(netMode)}`));
-                lines.push(row(`  ${dim('•')} ${muted('Allow network:')} ${boolVal(config.network.allowNetwork)}`));
+                lines.push(
+                  row(
+                    `  ${dim('•')} ${muted('Allow network:')} ${boolVal(config.network.allowNetwork)}`,
+                  ),
+                );
                 const domainsStr = config.network.allowedDomains.join(', ') || '(none)';
-                lines.push(row(`  ${dim('•')} ${muted('Allowed:')} ${text(truncateToWidth(domainsStr, Math.max(10, innerW - 15)))}`));
+                lines.push(
+                  row(
+                    `  ${dim('•')} ${muted('Allowed:')} ${text(truncateToWidth(domainsStr, Math.max(10, innerW - 15)))}`,
+                  ),
+                );
                 const denyStr = config.network.deniedDomains.join(', ') || '(none)';
-                lines.push(row(`  ${dim('•')} ${muted('Denied:')} ${text(truncateToWidth(denyStr, Math.max(10, innerW - 14)))}`));
+                lines.push(
+                  row(
+                    `  ${dim('•')} ${muted('Denied:')} ${text(truncateToWidth(denyStr, Math.max(10, innerW - 14)))}`,
+                  ),
+                );
                 if (sessionAllowedDomains.length > 0) {
-                  lines.push(row(`  ${dim('•')} ${muted('Session:')} ${theme.fg('accent', sessionAllowedDomains.join(', '))}`));
+                  lines.push(
+                    row(
+                      `  ${dim('•')} ${muted('Session:')} ${theme.fg('accent', sessionAllowedDomains.join(', '))}`,
+                    ),
+                  );
                 }
 
                 // Filesystem section
@@ -1396,22 +1458,46 @@ export function createLandstripIntegration(
                 lines.push(row(`${'─'.repeat(innerW)}`));
                 lines.push(row(`  ${accent('Filesystem')}`));
                 const denyReadStr = config.filesystem.denyRead.join(', ') || '(none)';
-                lines.push(row(`  ${dim('•')} ${muted('Deny read:')} ${text(truncateToWidth(denyReadStr, Math.max(10, innerW - 16)))}`));
+                lines.push(
+                  row(
+                    `  ${dim('•')} ${muted('Deny read:')} ${text(truncateToWidth(denyReadStr, Math.max(10, innerW - 16)))}`,
+                  ),
+                );
                 const allowReadStr = config.filesystem.allowRead.join(', ') || '(none)';
-                lines.push(row(`  ${dim('•')} ${muted('Allow read:')} ${text(truncateToWidth(allowReadStr, Math.max(10, innerW - 17)))}`));
+                lines.push(
+                  row(
+                    `  ${dim('•')} ${muted('Allow read:')} ${text(truncateToWidth(allowReadStr, Math.max(10, innerW - 17)))}`,
+                  ),
+                );
                 const allowWriteStr = config.filesystem.allowWrite.join(', ') || '(none)';
-                lines.push(row(`  ${dim('•')} ${muted('Allow write:')} ${text(truncateToWidth(allowWriteStr, Math.max(10, innerW - 18)))}`));
+                lines.push(
+                  row(
+                    `  ${dim('•')} ${muted('Allow write:')} ${text(truncateToWidth(allowWriteStr, Math.max(10, innerW - 18)))}`,
+                  ),
+                );
                 const denyWriteStr = config.filesystem.denyWrite.join(', ') || '(none)';
-                lines.push(row(`  ${dim('•')} ${muted('Deny write:')} ${text(truncateToWidth(denyWriteStr, Math.max(10, innerW - 17)))}`));
+                lines.push(
+                  row(
+                    `  ${dim('•')} ${muted('Deny write:')} ${text(truncateToWidth(denyWriteStr, Math.max(10, innerW - 17)))}`,
+                  ),
+                );
 
                 // Session allowances
                 if (sessionAllowedReadPaths.length > 0 || sessionAllowedWritePaths.length > 0) {
                   lines.push(row(''));
                   if (sessionAllowedReadPaths.length > 0) {
-                    lines.push(row(`  ${dim('•')} ${muted('Session read:')} ${theme.fg('accent', sessionAllowedReadPaths.join(', '))}`));
+                    lines.push(
+                      row(
+                        `  ${dim('•')} ${muted('Session read:')} ${theme.fg('accent', sessionAllowedReadPaths.join(', '))}`,
+                      ),
+                    );
                   }
                   if (sessionAllowedWritePaths.length > 0) {
-                    lines.push(row(`  ${dim('•')} ${muted('Session write:')} ${theme.fg('accent', sessionAllowedWritePaths.join(', '))}`));
+                    lines.push(
+                      row(
+                        `  ${dim('•')} ${muted('Session write:')} ${theme.fg('accent', sessionAllowedWritePaths.join(', '))}`,
+                      ),
+                    );
                   }
                 }
 
