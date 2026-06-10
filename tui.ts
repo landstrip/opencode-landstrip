@@ -23,6 +23,22 @@ const tui: TuiPlugin = async (api) => {
       ],
     });
 
+    if (api.command) {
+      api.command.register(() => [
+        {
+          title: 'Sandbox',
+          value: 'sandbox',
+          description: 'Show sandbox configuration',
+          category: 'plugin',
+          suggested: true,
+          slash: { name: 'sandbox' },
+          onSelect: async () => {
+            await api.client.tui.executeCommand({ command: 'sandbox' });
+          },
+        },
+      ]);
+    }
+
     const client = api.client;
     if (client?.tui?.showToast) {
       client.tui
