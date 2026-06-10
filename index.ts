@@ -37,7 +37,7 @@ import {
   isToolCallEventType,
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
-import { Key, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+import { Key, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 interface SandboxFilesystemConfig {
   denyRead: string[];
@@ -80,7 +80,7 @@ interface LandstripErrorResponse {
   message: string;
 }
 
-const LANDSTRIP_VERSION = [0, 10, 1] as const;
+const LANDSTRIP_VERSION = [0, 10, 2] as const;
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
 const DEFAULT_CONFIG: SandboxConfig = {
@@ -109,8 +109,8 @@ const DEFAULT_CONFIG: SandboxConfig = {
   },
   filesystem: {
     denyRead: ['/Users', '/home'],
-    allowRead: ['.', '~/.config', '~/.gitconfig', '~/.local', '~/.cargo'],
-    allowWrite: ['.', '/tmp'],
+    allowRead: ['.', '~/.config', '~/.gitconfig', '~/.local', '~/.cargo', '/dev/null'],
+    allowWrite: ['.', '/tmp', '/dev/null'],
     denyWrite: ['.env', '.env.*', '*.pem', '*.key'],
   },
 };
@@ -414,99 +414,168 @@ async function showPermissionPrompt(
 ): Promise<PermissionChoice> {
   if (!ctx.hasUI) return 'abort';
 
-  const result = await ctx.ui.custom<PermissionChoice>((tui, theme, _kb, done) => {
-    let selectedIndex = 0;
-    let pendingAction: PermissionChoice | null = null;
+  const result = await ctx.ui.custom<PermissionChoice>(
+    (tui, theme, _kb, done) => {
+      let selectedIndex = 0;
+      let pendingAction: PermissionChoice | null = null;
 
-    function resolveChoice(action: PermissionChoice): void {
-      done(action);
-    }
+      function resolveChoice(action: PermissionChoice): void {
+        done(action);
+      }
 
-    return {
-      render(width: number): string[] {
-        const lines: string[] = [];
-        lines.push(truncateToWidth(theme.fg('warning', title), width));
-        lines.push('');
+      return {
+        render(width: number): string[] {
+          const innerW = width - 4;
+          const lines: string[] = [];
+          const border = theme.fg('border', '│');
+          const dim = (s: string) => theme.fg('dim', s);
+          const borderFg = (s: string) => theme.fg('border', s);
 
-        for (let i = 0; i < options.length; i++) {
-          const option = options[i];
-          const isSelected = i === selectedIndex;
-          const isPending = pendingAction === option.action;
-          const prefix = isSelected ? ' -> ' : '    ';
-          const keyHint = theme.fg('accent', `[${option.key}]`);
-          let label = option.label;
+          // Top border with title
+          const label = ' Sandbox ';
+          const topLeft = borderFg('╭─');
+          const topRight = borderFg('─╮');
+          const topFill = borderFg('─'.repeat(Math.max(0, width - 4 - visibleWidth(label))));
+          lines.push(`${topLeft}${theme.fg('accent', label)}${topFill}${topRight}`);
 
-          if (option.hint) label += `  ${theme.fg('dim', option.hint)}`;
-          if (isPending) label += `  ${theme.fg('warning', '-> press Enter to confirm')}`;
+          // Blank spacing
+          lines.push(`${border} ${' '.repeat(innerW)} ${border}`);
 
-          lines.push(truncateToWidth(`${prefix}${keyHint} ${label}`, width));
-        }
+          // Title line
+          const titleText = truncateToWidth(theme.fg('warning', title), innerW);
+          const titlePad = Math.max(0, innerW - visibleWidth(titleText));
+          lines.push(`${border} ${titleText}${' '.repeat(titlePad)} ${border}`);
 
-        lines.push('');
-        lines.push(
-          truncateToWidth(
-            theme.fg(
-              'dim',
-              pendingAction
-                ? 'up/down navigate  enter confirm  esc cancel'
-                : 'up/down navigate  enter select  esc cancel',
-            ),
-            width,
-          ),
-        );
+          lines.push(`${border} ${' '.repeat(innerW)} ${border}`);
 
-        return lines;
-      },
+          // Options
+          for (let i = 0; i < options.length; i++) {
+            const option = options[i];
+            const isSelected = i === selectedIndex;
+            const isPending = pendingAction === option.action;
 
-      handleInput(data: string): void {
-        if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c'))) {
-          resolveChoice('abort');
-          return;
-        }
+            // Section divider before the permanent options (index 2 and 3)
+            if (i === 2) {
+              lines.push(`${border} ${' '.repeat(innerW)} ${border}`);
+              const secLabel = ' Permanent ';
+              const secDash = '─'.repeat(Math.max(0, innerW - visibleWidth(secLabel)));
+              lines.push(`${border} ${dim(secDash + secLabel)} ${border}`);
+              lines.push(`${border} ${' '.repeat(innerW)} ${border}`);
+            }
 
-        if (matchesKey(data, Key.enter)) {
-          resolveChoice(pendingAction ?? options[selectedIndex]?.action ?? 'abort');
-          return;
-        }
+            // Key badge
+            const keyBadge = isSelected
+              ? theme.fg('accent', `[${option.key}]`)
+              : dim(` ${option.key} `);
 
-        if (matchesKey(data, Key.up)) {
-          selectedIndex = Math.max(0, selectedIndex - 1);
-          pendingAction = null;
-          tui.requestRender();
-          return;
-        }
+            // Selection indicator
+            let cursor: string;
+            if (isSelected && isPending) {
+              cursor = theme.fg('warning', '▶');
+            } else if (isSelected) {
+              cursor = theme.fg('accent', '▶');
+            } else {
+              cursor = ' ';
+            }
 
-        if (matchesKey(data, Key.down)) {
-          selectedIndex = Math.min(options.length - 1, selectedIndex + 1);
-          pendingAction = null;
-          tui.requestRender();
-          return;
-        }
+            // Label
+            let label: string;
+            if (isPending) {
+              label = theme.fg('warning', option.label + '  — press Enter to confirm');
+            } else if (isSelected) {
+              label = theme.fg('text', option.label);
+            } else {
+              label = dim(option.label);
+            }
 
-        for (let i = 0; i < options.length; i++) {
-          const option = options[i];
+            // Hint
+            let hint = '';
+            if (option.hint && !isPending) {
+              hint = '  ' + dim(option.hint);
+            }
 
-          if (data === option.key) {
-            resolveChoice(option.action);
+            const fullLine = ` ${cursor} ${keyBadge} ${label}${hint}`;
+            const line = truncateToWidth(fullLine, innerW);
+            const pad = Math.max(0, innerW - visibleWidth(line));
+            lines.push(`${border} ${line}${' '.repeat(pad)} ${border}`);
+          }
+
+          // Footer
+          lines.push(`${border} ${' '.repeat(innerW)} ${border}`);
+          const footerText = pendingAction
+            ? '↑↓ navigate  enter confirm  esc cancel'
+            : '↑↓ navigate  enter select  esc dismiss';
+          const footerLine = dim(footerText);
+          const footerPad = Math.max(0, innerW - visibleWidth(footerLine));
+          lines.push(`${border} ${footerLine}${' '.repeat(footerPad)} ${border}`);
+
+          // Bottom border
+          const botLeft = borderFg('╰');
+          const botRight = borderFg('╯');
+          const botFill = borderFg('─'.repeat(width - 2));
+          lines.push(`${botLeft}${botFill}${botRight}`);
+
+          return lines;
+        },
+
+        handleInput(data: string): void {
+          if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c'))) {
+            resolveChoice('abort');
             return;
           }
 
-          if (data.toLowerCase() === option.key.toLowerCase()) {
-            if (option.confirm) {
-              pendingAction = option.action;
-              selectedIndex = i;
-            } else {
-              resolveChoice(option.action);
-            }
+          if (matchesKey(data, Key.enter)) {
+            resolveChoice(pendingAction ?? options[selectedIndex]?.action ?? 'abort');
+            return;
+          }
+
+          if (matchesKey(data, Key.up)) {
+            selectedIndex = Math.max(0, selectedIndex - 1);
+            pendingAction = null;
             tui.requestRender();
             return;
           }
-        }
-      },
 
-      invalidate(): void {},
-    };
-  });
+          if (matchesKey(data, Key.down)) {
+            selectedIndex = Math.min(options.length - 1, selectedIndex + 1);
+            pendingAction = null;
+            tui.requestRender();
+            return;
+          }
+
+          for (let i = 0; i < options.length; i++) {
+            const option = options[i];
+
+            if (data === option.key) {
+              resolveChoice(option.action);
+              return;
+            }
+
+            if (data.toLowerCase() === option.key.toLowerCase()) {
+              if (option.confirm) {
+                pendingAction = option.action;
+                selectedIndex = i;
+              } else {
+                resolveChoice(option.action);
+              }
+              tui.requestRender();
+              return;
+            }
+          }
+        },
+
+        invalidate(): void {},
+      };
+    },
+    {
+      overlay: true,
+      overlayOptions: {
+        anchor: 'center',
+        width: 72,
+        margin: 2,
+      },
+    },
+  );
 
   return result ?? 'abort';
 }
@@ -924,6 +993,7 @@ export function createLandstripIntegration(
           }
 
           signal?.addEventListener('abort', onAbort, { once: true });
+
           child.stdout?.on('data', onData);
           child.stderr?.on('data', (data: Buffer) => {
             onStderr(data);
@@ -1037,18 +1107,28 @@ export function createLandstripIntegration(
   }
 
   function enableStatus(ctx: ExtensionContext, config: SandboxConfig): void {
-    const networkLabel = config.network.allowNetwork
-      ? 'unrestricted'
-      : allowsAllDomains(config.network.allowedDomains)
-        ? 'all domains'
-        : `${config.network.allowedDomains.length} domains`;
-    ctx.ui.setStatus(
-      'sandbox',
-      ctx.ui.theme.fg(
-        'accent',
-        `Sandbox: ${networkLabel}, ${config.filesystem.allowWrite.length} write paths`,
-      ),
-    );
+    const theme = ctx.ui.theme;
+    const dot = theme.fg('success', '●');
+    const label = theme.fg('text', 'Sandbox');
+
+    let networkLabel: string;
+    let networkColor: 'warning' | 'accent';
+    if (config.network.allowNetwork) {
+      networkLabel = 'unrestricted';
+      networkColor = 'warning';
+    } else if (allowsAllDomains(config.network.allowedDomains)) {
+      networkLabel = 'any domain';
+      networkColor = 'warning';
+    } else {
+      networkLabel = `${config.network.allowedDomains.length} domains`;
+      networkColor = 'accent';
+    }
+
+    const sep = theme.fg('dim', '·');
+    const net = theme.fg(networkColor, networkLabel);
+    const write = theme.fg('accent', `${config.filesystem.allowWrite.length} write paths`);
+
+    ctx.ui.setStatus('sandbox', `${dot} ${label}  ${sep}  ${net}  ${sep}  ${write}`);
   }
 
   function enableSandbox(ctx: ExtensionContext): boolean {
@@ -1075,7 +1155,7 @@ export function createLandstripIntegration(
     if (!hasMinimumVersion(version, LANDSTRIP_VERSION)) {
       sandboxEnabled = false;
       sandboxReady = false;
-      ctx.ui.notify(`landstrip 0.10.1 or newer is required; found: ${version}`, 'error');
+      ctx.ui.notify(`landstrip 0.10.2 or newer is required; found: ${version}`, 'error');
       return false;
     }
 
@@ -1241,7 +1321,7 @@ export function createLandstripIntegration(
 
         sandboxEnabled = false;
         sandboxReady = false;
-        ctx.ui.setStatus('sandbox', '');
+        ctx.ui.setStatus('sandbox', undefined);
         ctx.ui.notify('Sandbox disabled', 'info');
       },
     });
@@ -1256,34 +1336,111 @@ export function createLandstripIntegration(
 
         const config = loadConfig(ctx.cwd);
         const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
-        const lines = [
-          'Sandbox Configuration',
-          `  Project config: ${projectPath}`,
-          `  Global config:  ${globalPath}`,
-          `  landstrip:      ${binaryPath()}`,
-          '',
-          `Network (bash ${config.network.allowNetwork ? 'unrestricted' : 'through HTTP proxy'}):`,
-          `  Allow network:  ${config.network.allowNetwork}`,
-          `  Allowed domains: ${config.network.allowedDomains.join(', ') || '(none)'}`,
-          `  Denied domains:  ${config.network.deniedDomains.join(', ') || '(none)'}`,
-          ...(sessionAllowedDomains.length > 0
-            ? [`  Session allowed: ${sessionAllowedDomains.join(', ')}`]
-            : []),
-          '',
-          'Filesystem (bash + read/write/edit tools):',
-          `  Deny Read:   ${config.filesystem.denyRead.join(', ') || '(none)'}`,
-          `  Allow Read:  ${config.filesystem.allowRead.join(', ') || '(none)'}`,
-          `  Allow Write: ${config.filesystem.allowWrite.join(', ') || '(none)'}`,
-          `  Deny Write:  ${config.filesystem.denyWrite.join(', ') || '(none)'}`,
-          ...(sessionAllowedReadPaths.length > 0
-            ? [`  Session read:  ${sessionAllowedReadPaths.join(', ')}`]
-            : []),
-          ...(sessionAllowedWritePaths.length > 0
-            ? [`  Session write: ${sessionAllowedWritePaths.join(', ')}`]
-            : []),
-        ];
 
-        ctx.ui.notify(lines.join('\n'), 'info');
+        await ctx.ui.custom(
+          (tui, theme, _kb, done) => {
+            const dim = (s: string) => theme.fg('dim', s);
+            const muted = (s: string) => theme.fg('muted', s);
+            const accent = (s: string) => theme.fg('accent', s);
+            const text = (s: string) => theme.fg('text', s);
+            const borderFg = (s: string) => theme.fg('border', s);
+
+            function boolVal(v: boolean): string {
+              return v ? theme.fg('warning', 'yes') : theme.fg('success', 'no');
+            }
+
+            function makeRow(content: string, innerW: number, border: string): string {
+              const line = truncateToWidth(content, innerW);
+              const pad = Math.max(0, innerW - visibleWidth(line));
+              return `${border} ${line}${' '.repeat(pad)} ${border}`;
+            }
+
+            return {
+              render(width: number): string[] {
+                const innerW = width - 4;
+                const border = borderFg('│');
+                const row = (c: string) => makeRow(c, innerW, border);
+                const lines: string[] = [];
+
+                // Top border
+                const title = accent(' Sandbox Configuration ');
+                const topFill = borderFg('─'.repeat(Math.max(0, width - 4 - visibleWidth(title))));
+                lines.push(`${borderFg('╭─')}${title}${topFill}${borderFg('─╮')}`);
+
+                // Status
+                const statusDot = theme.fg('success', '●');
+                const pathSnippet = text(truncateToWidth(binaryPath(), Math.max(20, innerW - 27)));
+                lines.push(row(`  ${statusDot} ${text('Active')}  ${dim('·')}  ${muted('landstrip:')} ${pathSnippet}`));
+
+                // Config files
+                lines.push(row(`  ${dim('Config files:')}`));
+                lines.push(row(`    ${dim('project')} ${text(projectPath)}`));
+                lines.push(row(`    ${dim('global')}  ${text(globalPath)}`));
+
+                // Network section
+                lines.push(row(''));
+                lines.push(row(`${'─'.repeat(innerW)}`));
+                const netMode = config.network.allowNetwork ? ' (unrestricted)' : ' (proxied)';
+                lines.push(row(`  ${accent('Network')}${dim(netMode)}`));
+                lines.push(row(`  ${dim('•')} ${muted('Allow network:')} ${boolVal(config.network.allowNetwork)}`));
+                const domainsStr = config.network.allowedDomains.join(', ') || '(none)';
+                lines.push(row(`  ${dim('•')} ${muted('Allowed:')} ${text(truncateToWidth(domainsStr, Math.max(10, innerW - 15)))}`));
+                const denyStr = config.network.deniedDomains.join(', ') || '(none)';
+                lines.push(row(`  ${dim('•')} ${muted('Denied:')} ${text(truncateToWidth(denyStr, Math.max(10, innerW - 14)))}`));
+                if (sessionAllowedDomains.length > 0) {
+                  lines.push(row(`  ${dim('•')} ${muted('Session:')} ${theme.fg('accent', sessionAllowedDomains.join(', '))}`));
+                }
+
+                // Filesystem section
+                lines.push(row(''));
+                lines.push(row(`${'─'.repeat(innerW)}`));
+                lines.push(row(`  ${accent('Filesystem')}`));
+                const denyReadStr = config.filesystem.denyRead.join(', ') || '(none)';
+                lines.push(row(`  ${dim('•')} ${muted('Deny read:')} ${text(truncateToWidth(denyReadStr, Math.max(10, innerW - 16)))}`));
+                const allowReadStr = config.filesystem.allowRead.join(', ') || '(none)';
+                lines.push(row(`  ${dim('•')} ${muted('Allow read:')} ${text(truncateToWidth(allowReadStr, Math.max(10, innerW - 17)))}`));
+                const allowWriteStr = config.filesystem.allowWrite.join(', ') || '(none)';
+                lines.push(row(`  ${dim('•')} ${muted('Allow write:')} ${text(truncateToWidth(allowWriteStr, Math.max(10, innerW - 18)))}`));
+                const denyWriteStr = config.filesystem.denyWrite.join(', ') || '(none)';
+                lines.push(row(`  ${dim('•')} ${muted('Deny write:')} ${text(truncateToWidth(denyWriteStr, Math.max(10, innerW - 17)))}`));
+
+                // Session allowances
+                if (sessionAllowedReadPaths.length > 0 || sessionAllowedWritePaths.length > 0) {
+                  lines.push(row(''));
+                  if (sessionAllowedReadPaths.length > 0) {
+                    lines.push(row(`  ${dim('•')} ${muted('Session read:')} ${theme.fg('accent', sessionAllowedReadPaths.join(', '))}`));
+                  }
+                  if (sessionAllowedWritePaths.length > 0) {
+                    lines.push(row(`  ${dim('•')} ${muted('Session write:')} ${theme.fg('accent', sessionAllowedWritePaths.join(', '))}`));
+                  }
+                }
+
+                // Footer
+                lines.push(row(''));
+                lines.push(row(`  ${dim('esc')} ${muted('or any key to close')}`));
+
+                // Bottom border
+                lines.push(`${borderFg('╰')}${borderFg('─'.repeat(width - 2))}${borderFg('╯')}`);
+
+                return lines;
+              },
+
+              handleInput(): void {
+                done(undefined);
+              },
+
+              invalidate(): void {},
+            };
+          },
+          {
+            overlay: true,
+            overlayOptions: {
+              anchor: 'center',
+              width: 78,
+              margin: 2,
+            },
+          },
+        );
       },
     });
   }
