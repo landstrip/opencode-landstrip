@@ -5,8 +5,6 @@ import type { Hooks, Plugin, PluginInput, PluginOptions } from '@opencode-ai/plu
 
 import { binaryPath } from '@jarkkojs/landstrip';
 
-export { tui } from './tui.js';
-
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -478,7 +476,7 @@ function writePolicyFile(
   baseDirectory: string,
   proxyPort: number,
 ): { dir: string; path: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'opencode-landstrip-'));
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-landstrip-XXXXXX'));
   const path = join(dir, 'policy.json');
   writeFileSync(
     path,
