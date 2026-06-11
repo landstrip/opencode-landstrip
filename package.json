@@ -16,6 +16,7 @@
   "files": [
     "index.ts",
     "tui.ts",
+    "landstrip.d.ts",
     "README.md",
     "sandbox.json"
   ],
@@ -50,17 +51,17 @@
     "@jarkkojs/landstrip": "^0.11.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.16.2",
-    "@opentui/core": ">=0.3.2",
-    "@opentui/keymap": ">=0.3.2",
-    "@opentui/solid": ">=0.3.2",
+    "@opencode-ai/plugin": "^1.17.3",
+    "@opentui/core": ">=0.3.4",
+    "@opentui/keymap": ">=0.3.4",
+    "@opentui/solid": ">=0.3.4",
     "@types/node": "^24.0.0",
     "oxfmt": "^0.53.0",
     "oxlint": "^1.68.0",
     "typescript": "^5.8.2"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.16.2"
+    "@opencode-ai/plugin": "^1.17.3"
   },
   "peerDependenciesMeta": {
     "@opencode-ai/plugin": {
@@ -68,6 +69,6 @@
     }
   },
   "engines": {
-    "opencode": ">=1.16.2"
+    "opencode": ">=1.17.3"
   }
 }

@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import ts from 'typescript';
 
-test('bash wrapping is idempotent for repeated before hooks', async () => {
+async function withPlugin(options, run) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const tempDir = await mkdtemp(join(tmpdir(), 'opencode-landstrip-test-'));
   const modulePath = join(tempDir, 'plugin.mjs');
@@ -66,43 +66,185 @@ test('bash wrapping is idempotent for repeated before hooks', async () => {
         },
         directory: tempDir,
       },
-      {
-        enabled: true,
-        filesystem: {
-          allowRead: [tempDir],
-          allowWrite: [tempDir],
-          denyRead: [],
-          denyWrite: [],
-        },
-        network: { allowedDomains: ['*'], deniedDomains: [] },
-      },
+      options,
     );
 
-    const input = { callID: 'bash-call', tool: 'bash' };
-    try {
-      const output = {
-        args: {
-          command: 'git status --short',
-          description: 'Shows concise git status',
-        },
-      };
-
-      await hooks['tool.execute.before'](input, output);
-      const wrapped = output.args.command;
-
-      assert.notEqual(wrapped, 'git status --short', messages.join('\n'));
-
-      await hooks['tool.execute.before'](input, output);
-
-      assert.equal(output.args.command, wrapped);
-      assert.equal(output.args.description, 'Shows concise git status (landstrip)');
-      assert.equal(wrapped.match(/'-p'/g)?.length, 1);
-    } finally {
-      await hooks['tool.execute.after'](input, { title: '', output: '', metadata: {} });
-    }
+    await run({ hooks, messages, tempDir });
   } finally {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     await rm(tempDir, { force: true, recursive: true });
   }
+}
+
+test('bash wrapping is idempotent for repeated before hooks', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: {
+        allowRead: ['.'],
+        allowWrite: ['.'],
+        denyRead: [],
+        denyWrite: [],
+      },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks, messages }) => {
+      const input = { callID: 'bash-call', tool: 'bash' };
+      try {
+        const output = {
+          args: {
+            command: 'git status --short',
+            description: 'Shows concise git status',
+          },
+        };
+
+        await hooks['tool.execute.before'](input, output);
+        const wrapped = output.args.command;
+
+        assert.notEqual(wrapped, 'git status --short', messages.join('\n'));
+
+        await hooks['tool.execute.before'](input, output);
+
+        assert.equal(output.args.command, wrapped);
+        assert.equal(output.args.description, 'Shows concise git status (landstrip)');
+        assert.equal(wrapped.match(/'-p'/g)?.length, 1);
+      } finally {
+        await hooks['tool.execute.after'](input, { title: '', output: '', metadata: {} });
+      }
+    },
+  );
+});
+
+test('permission.ask can approve one edit call outside allowWrite', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: {
+        allowRead: ['.'],
+        allowWrite: ['.'],
+        denyRead: [],
+        denyWrite: [],
+      },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks, tempDir }) => {
+      const filepath = resolve(tempDir, '..', 'outside.txt');
+      const permissionOutput = { status: 'allow' };
+
+      await hooks['permission.ask'](
+        {
+          id: 'permission-edit',
+          type: 'edit',
+          callID: 'edit-call',
+          sessionID: 'session',
+          messageID: 'message',
+          title: 'Edit file',
+          metadata: { filepath },
+          time: { created: 0 },
+        },
+        permissionOutput,
+      );
+
+      assert.equal(permissionOutput.status, 'ask');
+      await hooks['tool.execute.before'](
+        { callID: 'edit-call', tool: 'edit' },
+        { args: { path: filepath } },
+      );
+    },
+  );
+});
+
+test('permission.ask deny is not remembered as a read allowance', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: {
+        allowRead: [],
+        allowWrite: ['.'],
+        denyRead: ['/tmp/opencode-landstrip-denied'],
+        denyWrite: [],
+      },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks }) => {
+      const filepath = '/tmp/opencode-landstrip-denied/secret.txt';
+      const permissionOutput = { status: 'allow' };
+
+      await hooks['permission.ask'](
+        {
+          id: 'permission-read',
+          type: 'read',
+          pattern: filepath,
+          callID: 'read-call',
+          sessionID: 'session',
+          messageID: 'message',
+          title: 'Read file',
+          metadata: {},
+          time: { created: 0 },
+        },
+        permissionOutput,
+      );
+
+      assert.equal(permissionOutput.status, 'deny');
+      await assert.rejects(
+        hooks['tool.execute.before'](
+          { callID: 'read-call', tool: 'read' },
+          { args: { path: filepath } },
+        ),
+        /read access denied/,
+      );
+    },
+  );
+});
+
+test('permission.ask can approve one bash domain for wrapping policy', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: {
+        allowRead: ['.'],
+        allowWrite: ['.'],
+        denyRead: [],
+        denyWrite: [],
+      },
+      network: { allowedDomains: [], deniedDomains: [] },
+    },
+    async ({ hooks }) => {
+      const input = { callID: 'bash-domain-call', tool: 'bash' };
+      const permissionOutput = { status: 'allow' };
+
+      await hooks['permission.ask'](
+        {
+          id: 'permission-bash',
+          type: 'bash',
+          callID: input.callID,
+          sessionID: 'session',
+          messageID: 'message',
+          title: 'Run shell command',
+          metadata: { command: 'curl https://example.com' },
+          time: { created: 0 },
+        },
+        permissionOutput,
+      );
+
+      assert.equal(permissionOutput.status, 'ask');
+
+      try {
+        const output = {
+          args: {
+            command: 'curl https://example.com',
+            description: 'Fetch example',
+          },
+        };
+
+        await hooks['tool.execute.before'](input, output);
+
+        assert.notEqual(output.args.command, 'curl https://example.com');
+        assert.equal(output.args.description, 'Fetch example (landstrip)');
+      } finally {
+        await hooks['tool.execute.after'](input, { title: '', output: '', metadata: {} });
+      }
+    },
+  );
 });

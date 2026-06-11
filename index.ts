@@ -74,6 +74,15 @@ interface BashSandboxState {
   stop: (() => Promise<void>) | null;
 }
 
+type SandboxPermissionKind = 'read' | 'write' | 'domain';
+
+interface SandboxPermissionDecision {
+  status: 'allow' | 'ask' | 'deny';
+  kind: SandboxPermissionKind;
+  resource: string;
+  message: string;
+}
+
 type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 
 const LANDSTRIP_VERSION = [0, 11, 0] as const;
@@ -432,6 +441,89 @@ function firstBlockedDomain(
   }
 
   return null;
+}
+
+function evaluateReadPermission(
+  path: string,
+  config: SandboxConfig,
+  baseDirectory: string,
+  effectiveAllowRead: string[],
+): SandboxPermissionDecision {
+  const filePath = canonicalizePath(path, baseDirectory);
+
+  if (!shouldPromptForRead(filePath, effectiveAllowRead, baseDirectory)) {
+    return { status: 'allow', kind: 'read', resource: filePath, message: '' };
+  }
+
+  if (isBlockedByDenyRead(filePath, config, baseDirectory)) {
+    return {
+      status: 'deny',
+      kind: 'read',
+      resource: filePath,
+      message: `Sandbox: read access denied for "${filePath}" (denyRead overrides allowRead).`,
+    };
+  }
+
+  return {
+    status: 'ask',
+    kind: 'read',
+    resource: filePath,
+    message: `Sandbox: read access requires approval for "${filePath}" (not in filesystem.allowRead).`,
+  };
+}
+
+function evaluateWritePermission(
+  path: string,
+  config: SandboxConfig,
+  baseDirectory: string,
+  effectiveAllowWrite: string[],
+): SandboxPermissionDecision {
+  const filePath = canonicalizePath(path, baseDirectory);
+
+  if (!shouldPromptForWrite(filePath, effectiveAllowWrite, baseDirectory)) {
+    return { status: 'allow', kind: 'write', resource: filePath, message: '' };
+  }
+
+  if (matchesPattern(filePath, config.filesystem.denyWrite, baseDirectory)) {
+    return {
+      status: 'deny',
+      kind: 'write',
+      resource: filePath,
+      message: `Sandbox: write access denied for "${filePath}" (in filesystem.denyWrite).`,
+    };
+  }
+
+  return {
+    status: 'ask',
+    kind: 'write',
+    resource: filePath,
+    message: `Sandbox: write access requires approval for "${filePath}" (not in filesystem.allowWrite).`,
+  };
+}
+
+function evaluateDomainPermission(
+  domain: string,
+  config: SandboxConfig,
+): SandboxPermissionDecision {
+  if (config.network.allowNetwork || domainMatchesAny(domain, config.network.allowedDomains)) {
+    return { status: 'allow', kind: 'domain', resource: domain, message: '' };
+  }
+
+  if (domainMatchesAny(domain, config.network.deniedDomains)) {
+    return {
+      status: 'deny',
+      kind: 'domain',
+      resource: domain,
+      message: `Sandbox: network access denied for "${domain}" (is blocked by network.deniedDomains).`,
+    };
+  }
+
+  return {
+    status: 'ask',
+    kind: 'domain',
+    resource: domain,
+    message: `Sandbox: network access requires approval for "${domain}" (not in network.allowedDomains).`,
+  };
 }
 
 function landstripVersion(): string | null {
@@ -829,69 +921,14 @@ function errorWithConfigPaths(baseDirectory: string, message: string): Error {
   return new Error(`${message}\n\nUpdate sandbox config in:\n  ${projectPath}\n  ${globalPath}`);
 }
 
-function assertReadAllowed(
-  path: string,
-  config: SandboxConfig,
-  baseDirectory: string,
-  effectiveAllowRead: string[],
-): void {
-  const filePath = canonicalizePath(path, baseDirectory);
-
-  if (!shouldPromptForRead(filePath, effectiveAllowRead, baseDirectory)) return;
-
-  if (isBlockedByDenyRead(filePath, config, baseDirectory)) {
-    throw errorWithConfigPaths(
-      baseDirectory,
-      `Sandbox: read access denied for "${filePath}" (denyRead overrides allowRead).`,
-    );
-  }
-
-  throw errorWithConfigPaths(
-    baseDirectory,
-    `Sandbox: read access denied for "${filePath}" (not in filesystem.allowRead).`,
-  );
-}
-
-function assertWriteAllowed(
-  path: string,
-  config: SandboxConfig,
-  baseDirectory: string,
-  effectiveAllowWrite: string[],
-): void {
-  const filePath = canonicalizePath(path, baseDirectory);
-
-  if (!shouldPromptForWrite(filePath, effectiveAllowWrite, baseDirectory)) return;
-
-  if (matchesPattern(filePath, config.filesystem.denyWrite, baseDirectory)) {
-    throw errorWithConfigPaths(
-      baseDirectory,
-      `Sandbox: write access denied for "${filePath}" (in filesystem.denyWrite).`,
-    );
-  }
-
-  throw errorWithConfigPaths(
-    baseDirectory,
-    `Sandbox: write access denied for "${filePath}" (not in filesystem.allowWrite).`,
-  );
-}
-
-function assertApplyPatchAllowed(
-  args: Record<string, unknown>,
-  config: SandboxConfig,
-  baseDirectory: string,
-  effectiveAllowWrite: string[],
-): void {
-  if (typeof args.patchText !== 'string') return;
-  for (const path of extractPatchPaths(args.patchText))
-    assertWriteAllowed(path, config, baseDirectory, effectiveAllowWrite);
-}
-
 const plugin: Plugin = async ({ client, directory }: PluginInput, options?: PluginOptions) => {
   const optionOverrides = normalizeOptions(options);
   const activeBash = new Map<string, BashSandboxState>();
   const notified = new Set<string>();
   const sessionAllowedReadPaths: string[] = [];
   const sessionAllowedWritePaths: string[] = [];
+  const sessionAllowedDomains: string[] = [];
+  const callAllowances = new Set<string>();
   let enabledNotified = false;
   let sandboxDisabled = false;
   let configuredShell: string | undefined;
@@ -903,6 +940,31 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
 
   function getEffectiveAllowWrite(config: SandboxConfig): string[] {
     return [...config.filesystem.allowWrite, ...sessionAllowedWritePaths];
+  }
+
+  function getEffectiveAllowedDomains(config: SandboxConfig): string[] {
+    return [...config.network.allowedDomains, ...sessionAllowedDomains];
+  }
+
+  function allowanceKey(callID: string, kind: SandboxPermissionKind, resource: string): string {
+    return `${callID}:${kind}:${resource}`;
+  }
+
+  function rememberCallAllowance(
+    callID: string | undefined,
+    decision: SandboxPermissionDecision,
+  ): void {
+    if (!callID || decision.status === 'deny') return;
+    callAllowances.add(allowanceKey(callID, decision.kind, decision.resource));
+  }
+
+  function hasCallAllowance(callID: string, decision: SandboxPermissionDecision): boolean {
+    return callAllowances.has(allowanceKey(callID, decision.kind, decision.resource));
+  }
+
+  function enforcePermission(callID: string, decision: SandboxPermissionDecision): void {
+    if (decision.status === 'allow' || hasCallAllowance(callID, decision)) return;
+    throw errorWithConfigPaths(directory, decision.message);
   }
 
   function pushCommandText(
@@ -922,7 +984,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
   function sandboxSummary(config: SandboxConfig): string {
     const { globalPath, projectPath } = getConfigPaths(directory);
     const networkMode = config.network.allowNetwork ? 'unrestricted' : 'proxied';
-    const allowed = config.network.allowedDomains.join(', ') || '(none)';
+    const allowed = getEffectiveAllowedDomains(config).join(', ') || '(none)';
     const denied = config.network.deniedDomains.join(', ') || '(none)';
     const denyRead = config.filesystem.denyRead.join(', ') || '(none)';
     const allowRead = getEffectiveAllowRead(config).join(', ') || '(none)';
@@ -1130,27 +1192,37 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     }
 
     const allowNetwork = config.network.allowNetwork;
+    const callAllowedDomains: string[] = [];
+    const effectiveConfig = {
+      ...config,
+      network: { ...config.network, allowedDomains: getEffectiveAllowedDomains(config) },
+    };
 
     if (!allowNetwork) {
-      const blockedDomain = firstBlockedDomain(args.command as string, config);
-      if (blockedDomain) {
-        const reason =
-          blockedDomain.reason === 'deniedDomains'
-            ? 'is blocked by network.deniedDomains'
-            : 'is not in network.allowedDomains';
-        throw errorWithConfigPaths(
-          directory,
-          `Sandbox: network access denied for "${blockedDomain.domain}" (${reason}).`,
-        );
+      for (const domain of extractDomainsFromCommand(args.command as string)) {
+        const decision = evaluateDomainPermission(domain, effectiveConfig);
+        if (decision.status === 'allow') continue;
+        if (decision.status === 'ask' && hasCallAllowance(callID, decision)) {
+          callAllowedDomains.push(domain);
+          continue;
+        }
+        throw errorWithConfigPaths(directory, decision.message);
       }
     }
 
-    const proxy = allowNetwork ? null : await startProxy(config);
+    if (callAllowedDomains.length > 0) {
+      effectiveConfig.network = {
+        ...effectiveConfig.network,
+        allowedDomains: [...effectiveConfig.network.allowedDomains, ...callAllowedDomains],
+      };
+    }
+
+    const proxy = allowNetwork ? null : await startProxy(effectiveConfig);
     const proxyPort = proxy ? proxy.port : null;
     let policy: { dir: string; path: string };
 
     try {
-      policy = writePolicyFile(config, directory, proxyPort);
+      policy = writePolicyFile(effectiveConfig, directory, proxyPort);
     } catch (error) {
       if (proxy) await proxy.stop().catch(() => undefined);
       throw error;
@@ -1181,6 +1253,80 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       configuredShell = configuredShellPath(config);
     },
 
+    'permission.ask': async (input, output) => {
+      const config = await activeConfig();
+      if (!config) return;
+
+      const request = input as Record<string, unknown>;
+      const permission =
+        typeof request.type === 'string'
+          ? request.type
+          : typeof request.permission === 'string'
+            ? request.permission
+            : typeof request.action === 'string'
+              ? request.action
+              : '';
+      const metadata = isRecord(request.metadata) ? request.metadata : {};
+      const tool = isRecord(request.tool) ? request.tool : undefined;
+      const callID =
+        typeof request.callID === 'string'
+          ? request.callID
+          : typeof tool?.callID === 'string'
+            ? tool.callID
+            : undefined;
+      const patterns = Array.isArray(request.patterns)
+        ? request.patterns.filter((item): item is string => typeof item === 'string')
+        : typeof request.pattern === 'string'
+          ? [request.pattern]
+          : Array.isArray(request.resources)
+            ? request.resources.filter((item): item is string => typeof item === 'string')
+            : [];
+
+      const decisions: SandboxPermissionDecision[] = [];
+      const effectiveAllowRead = getEffectiveAllowRead(config);
+      const effectiveAllowWrite = getEffectiveAllowWrite(config);
+
+      if (permission === 'read') {
+        for (const pattern of patterns) {
+          decisions.push(evaluateReadPermission(pattern, config, directory, effectiveAllowRead));
+        }
+      }
+
+      if (permission === 'glob' || permission === 'grep' || permission === 'list') {
+        const searchPath = typeof metadata.path === 'string' ? metadata.path : '.';
+        decisions.push(evaluateReadPermission(searchPath, config, directory, effectiveAllowRead));
+      }
+
+      if (permission === 'edit') {
+        const filepath =
+          typeof metadata.filepath === 'string'
+            ? metadata.filepath
+            : patterns.length === 1
+              ? patterns[0]
+              : undefined;
+        if (filepath) {
+          decisions.push(evaluateWritePermission(filepath, config, directory, effectiveAllowWrite));
+        }
+      }
+
+      if (permission === 'bash') {
+        const command = typeof metadata.command === 'string' ? metadata.command : patterns[0];
+        if (typeof command === 'string' && !config.network.allowNetwork) {
+          for (const domain of extractDomainsFromCommand(command)) {
+            decisions.push(evaluateDomainPermission(domain, config));
+          }
+        }
+      }
+
+      const decision =
+        decisions.find((item) => item.status === 'deny') ??
+        decisions.find((item) => item.status === 'ask');
+      if (!decision) return;
+
+      output.status = decision.status;
+      rememberCallAllowance(callID, decision);
+    },
+
     'tool.execute.before': async (input, output) => {
       if (!isRecord(output.args)) return;
 
@@ -1197,23 +1343,40 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
 
       if (input.tool === 'read') {
         const path = getToolPath(output.args);
-        if (path) assertReadAllowed(path, config, directory, effectiveAllowRead);
+        if (path)
+          enforcePermission(
+            input.callID,
+            evaluateReadPermission(path, config, directory, effectiveAllowRead),
+          );
         return;
       }
 
       if (input.tool === 'glob' || input.tool === 'grep' || input.tool === 'list') {
-        assertReadAllowed(getSearchPath(output.args), config, directory, effectiveAllowRead);
+        enforcePermission(
+          input.callID,
+          evaluateReadPermission(getSearchPath(output.args), config, directory, effectiveAllowRead),
+        );
         return;
       }
 
       if (input.tool === 'write' || input.tool === 'edit') {
         const path = getToolPath(output.args);
-        if (path) assertWriteAllowed(path, config, directory, effectiveAllowWrite);
+        if (path)
+          enforcePermission(
+            input.callID,
+            evaluateWritePermission(path, config, directory, effectiveAllowWrite),
+          );
         return;
       }
 
-      if (input.tool === 'apply_patch')
-        assertApplyPatchAllowed(output.args, config, directory, effectiveAllowWrite);
+      if (input.tool === 'apply_patch' && typeof output.args.patchText === 'string') {
+        for (const path of extractPatchPaths(output.args.patchText)) {
+          enforcePermission(
+            input.callID,
+            evaluateWritePermission(path, config, directory, effectiveAllowWrite),
+          );
+        }
+      }
     },
 
     'shell.env': async (input, output) => {
@@ -1258,31 +1421,11 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
 
       const blockedPath = extractBlockedWritePath(outputText, directory, state.originalCommand);
       if (blockedPath) {
-        const config = loadConfig(directory, optionOverrides);
-        if (
-          !sessionAllowedWritePaths.includes(blockedPath) &&
-          !matchesPattern(blockedPath, config.filesystem.allowWrite, directory) &&
-          !matchesPattern(blockedPath, config.filesystem.denyWrite, directory)
-        ) {
-          sessionAllowedWritePaths.push(blockedPath);
-          await notifyOnce(
-            `write-allow:${blockedPath}`,
-            `Write access granted for session: "${blockedPath}"`,
-            'warning',
-          );
-        }
-        if (
-          !sessionAllowedReadPaths.includes(blockedPath) &&
-          !matchesPattern(blockedPath, config.filesystem.allowRead, directory) &&
-          !matchesPattern(blockedPath, config.filesystem.denyRead, directory)
-        ) {
-          sessionAllowedReadPaths.push(blockedPath);
-          await notifyOnce(
-            `read-allow:${blockedPath}`,
-            `Read access granted for session: "${blockedPath}"`,
-            'warning',
-          );
-        }
+        await notifyOnce(
+          `blocked:${blockedPath}`,
+          `Sandbox blocked access to "${blockedPath}". Approve the related OpenCode permission prompt and retry if needed.`,
+          'warning',
+        );
       }
 
       await cleanupBash(input.callID);
@@ -1337,12 +1480,28 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
         const effectiveAllowWrite = getEffectiveAllowWrite(config);
 
         for (const path of extractCandidatePaths(shellCommand)) {
-          assertReadAllowed(path, config, directory, effectiveAllowRead);
-          assertWriteAllowed(path, config, directory, effectiveAllowWrite);
+          const readDecision = evaluateReadPermission(path, config, directory, effectiveAllowRead);
+          if (readDecision.status === 'deny') {
+            throw errorWithConfigPaths(directory, readDecision.message);
+          }
+
+          const writeDecision = evaluateWritePermission(
+            path,
+            config,
+            directory,
+            effectiveAllowWrite,
+          );
+          if (writeDecision.status === 'deny') {
+            throw errorWithConfigPaths(directory, writeDecision.message);
+          }
         }
 
         if (!config.network.allowNetwork) {
-          const blockedDomain = firstBlockedDomain(shellCommand, config);
+          const effectiveConfig = {
+            ...config,
+            network: { ...config.network, allowedDomains: getEffectiveAllowedDomains(config) },
+          };
+          const blockedDomain = firstBlockedDomain(shellCommand, effectiveConfig);
           if (blockedDomain) {
             const reason =
               blockedDomain.reason === 'deniedDomains'
