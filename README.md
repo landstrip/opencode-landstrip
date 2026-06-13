@@ -36,6 +36,5 @@ Use `/sandbox` inside Pi to show the active config.
 `pi-landstrip` is licensed under `MIT`. See [LICENSE](LICENSE) for more
 information.
 
-The bundled `@jarkkojs/landstrip` JavaScript package is licensed under
-`Apache-2.0`; its platform-specific native binary package is licensed under
-`LGPL-2.1-or-later`.
+The bundled `@jarkkojs/landstrip` package is licensed under
+`Apache-2.0 AND LGPL-2.1-or-later`.
