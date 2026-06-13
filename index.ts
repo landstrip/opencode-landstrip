@@ -85,7 +85,12 @@ interface LandstripErrorResponse {
   source?: string;
 }
 
-const LANDSTRIP_VERSION = [0, 11, 6] as const;
+interface LandstripBashCallbacks {
+  onStderr?: (data: Buffer) => void;
+  onErrorFd?: (data: Buffer) => void;
+}
+
+const LANDSTRIP_VERSION = [0, 11, 9] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
 const LANDSTRIP_ERROR_REASONS = new Set<LandstripErrorReason>([
   'Other',
@@ -1075,7 +1080,7 @@ export function createLandstripIntegration(
 
   function createLandstripBashOps(
     ctx: ExtensionContext,
-    onStderr: (data: Buffer) => void = () => {},
+    callbacks: LandstripBashCallbacks = {},
   ): BashOperations {
     return {
       async exec(command, cwd, { onData, signal, timeout, env }) {
@@ -1085,9 +1090,8 @@ export function createLandstripIntegration(
         const config = loadConfig(cwd);
         const allowNetwork = config.network.allowNetwork;
         const proxy = allowNetwork ? null : await startProxy(ctx, cwd);
-        const proxyPort = proxy ? proxy.port : null;
-        const policy = writePolicyFile(cwd, proxyPort);
-        const landstripArgs = ['-p', policy.path, shell, ...args, command];
+        const policy = writePolicyFile(cwd, proxy?.port ?? null);
+        const landstripArgs = ['--error-fd', '3', '-p', policy.path, shell, ...args, command];
 
         return new Promise((resolvePromise, reject) => {
           let timeoutHandle: NodeJS.Timeout | undefined;
@@ -1107,7 +1111,7 @@ export function createLandstripIntegration(
             cwd,
             env: allowNetwork ? { ...process.env, ...env } : proxyEnv(env, proxy!.port),
             detached: true,
-            stdio: ['ignore', 'pipe', 'pipe'],
+            stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
           });
 
           function killChild(): void {
@@ -1132,12 +1136,17 @@ export function createLandstripIntegration(
 
           signal?.addEventListener('abort', onAbort, { once: true });
           let stderrAcc = '';
+          let errorFdAcc = '';
 
           child.stdout?.on('data', onData);
           child.stderr?.on('data', (data: Buffer) => {
             stderrAcc += data.toString('utf8');
-            onStderr(data);
+            callbacks.onStderr?.(data);
             onData(data);
+          });
+          child.stdio[3]?.on('data', (data: Buffer) => {
+            errorFdAcc += data.toString('utf8');
+            callbacks.onErrorFd?.(data);
           });
 
           child.on('error', (error) => {
@@ -1156,8 +1165,14 @@ export function createLandstripIntegration(
               return;
             }
 
-            const blockedPath = extractBlockedPath(stderrAcc, cwd, command);
-            const blockedWritePath = extractBlockedWritePath(stderrAcc, cwd);
+            const errorOutput = errorFdAcc || stderrAcc;
+
+            const blockedPath =
+              extractBlockedPath(errorOutput, cwd, command) ??
+              (errorFdAcc ? extractBlockedPath(stderrAcc, cwd, command) : null);
+            const blockedWritePath =
+              extractBlockedWritePath(errorOutput, cwd) ??
+              (errorFdAcc ? extractBlockedWritePath(stderrAcc, cwd) : null);
             if (blockedPath && ctx.hasUI) {
               const config = loadConfig(cwd);
               const isDeniedByDenyRead = matchesPattern(blockedPath, config.filesystem.denyRead);
@@ -1183,7 +1198,7 @@ export function createLandstripIntegration(
                 if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
               }
             } else if (!blockedPath && ctx.hasUI) {
-              const landstripErrors = parseLandstripErrors(stderrAcc);
+              const landstripErrors = parseLandstripErrors(errorOutput);
               if (landstripErrors.length > 0) {
                 const formatted = formatLandstripErrors(landstripErrors);
                 ctx.ui.notify(`Sandbox blocked an operation: ${formatted}`, 'warning');
@@ -1204,10 +1219,16 @@ export function createLandstripIntegration(
     onUpdate: AgentToolUpdateCallback<BashToolDetails | undefined> | undefined,
     ctx: ExtensionContext,
   ): Promise<AgentToolResult<BashToolDetails | undefined>> {
-    let landstripStderr = '';
+    let landstripErrorOutput = '';
+    let stderrOutput = '';
     const sandboxedBash = createBashToolDefinition(ctx.cwd, {
-      operations: createLandstripBashOps(ctx, (data) => {
-        landstripStderr += data.toString('utf8');
+      operations: createLandstripBashOps(ctx, {
+        onErrorFd: (data) => {
+          landstripErrorOutput += data.toString('utf8');
+        },
+        onStderr: (data) => {
+          stderrOutput += data.toString('utf8');
+        },
       }),
       shellPath: SettingsManager.create(ctx.cwd).getShellPath(),
     });
@@ -1249,7 +1270,8 @@ export function createLandstripIntegration(
         ],
         details: {},
       });
-      landstripStderr = '';
+      landstripErrorOutput = '';
+      stderrOutput = '';
       return run();
     };
 
@@ -1258,24 +1280,29 @@ export function createLandstripIntegration(
       result = await run();
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
-      const blockedPath = extractBlockedWritePath(`${landstripStderr}\n${errorText}`, ctx.cwd);
+      const fallbackOutput = `${stderrOutput}\n${errorText}`;
+      const blockedPath =
+        extractBlockedWritePath(landstripErrorOutput, ctx.cwd) ??
+        extractBlockedWritePath(fallbackOutput, ctx.cwd);
       if (blockedPath) {
         const retryResult = await retryWithWriteAccess(blockedPath);
         if (retryResult) return retryResult;
       }
 
-      const landstripErrors = parseLandstripErrors(landstripStderr);
+      const landstripErrors = parseLandstripErrors(landstripErrorOutput || errorText);
       if (landstripErrors.length > 0) {
         throw new Error(formatLandstripErrors(landstripErrors));
       }
       throw error;
     }
-    const landstripErrors = parseLandstripErrors(landstripStderr);
+    const landstripErrors = parseLandstripErrors(landstripErrorOutput);
     if (landstripErrors.length > 0) {
       const message = formatLandstripErrors(landstripErrors);
       result.content.unshift({ type: 'text', text: `\n${message}\n` });
     }
-    const blockedPath = extractBlockedWritePath(landstripStderr, ctx.cwd);
+    const blockedPath =
+      extractBlockedWritePath(landstripErrorOutput, ctx.cwd) ??
+      extractBlockedWritePath(stderrOutput, ctx.cwd);
     if (!blockedPath) return result;
 
     const retryResult = await retryWithWriteAccess(blockedPath);
