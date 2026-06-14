@@ -53,11 +53,12 @@ interface LandstripPolicy {
 }
 
 interface LandstripErrorResponse {
-  reason: 'Other' | 'LaunchFailed' | 'SetupFailed' | 'Usage';
+  reason: 'Other' | 'AccessDenied' | 'LaunchFailed' | 'SetupFailed' | 'Usage';
   file?: string;
+  operation?: 'read' | 'write';
   program?: string;
   type?: 'filesystem' | 'network' | 'platform' | 'launch' | 'encoding';
-  source: string;
+  source?: string;
 }
 
 interface SandboxConfigOverrides {
@@ -85,8 +86,48 @@ interface SandboxPermissionDecision {
 
 type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 
-const LANDSTRIP_VERSION = [0, 11, 0] as const;
+const LANDSTRIP_VERSION = [0, 11, 9] as const;
+const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
+const LANDSTRIP_ERROR_REASONS = new Set<LandstripErrorResponse['reason']>([
+  'Other',
+  'AccessDenied',
+  'LaunchFailed',
+  'SetupFailed',
+  'Usage',
+]);
+const LANDSTRIP_OPERATIONS = new Set<NonNullable<LandstripErrorResponse['operation']>>([
+  'read',
+  'write',
+]);
+const LANDSTRIP_ERROR_TYPES = new Set<NonNullable<LandstripErrorResponse['type']>>([
+  'filesystem',
+  'network',
+  'platform',
+  'launch',
+  'encoding',
+]);
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
+const LANDSTRIP_PACKAGE_NAMES = new Set([
+  '@jarkkojs/landstrip',
+  '@jarkkojs/landstrip-darwin-arm64',
+  '@jarkkojs/landstrip-darwin-x64',
+  '@jarkkojs/landstrip-linux-x64',
+  '@jarkkojs/landstrip-win32-x64',
+]);
+
+function isLandstripErrorReason(value: string): value is LandstripErrorResponse['reason'] {
+  return LANDSTRIP_ERROR_REASONS.has(value as LandstripErrorResponse['reason']);
+}
+
+function isLandstripOperation(
+  value: string,
+): value is NonNullable<LandstripErrorResponse['operation']> {
+  return LANDSTRIP_OPERATIONS.has(value as NonNullable<LandstripErrorResponse['operation']>);
+}
+
+function isLandstripErrorType(value: string): value is NonNullable<LandstripErrorResponse['type']> {
+  return LANDSTRIP_ERROR_TYPES.has(value as NonNullable<LandstripErrorResponse['type']>);
+}
 
 const DEFAULT_CONFIG: SandboxConfig = {
   enabled: true,
@@ -95,36 +136,14 @@ const DEFAULT_CONFIG: SandboxConfig = {
     allowLocalBinding: false,
     allowAllUnixSockets: false,
     allowUnixSockets: [],
-    allowedDomains: [
-      'npmjs.org',
-      '*.npmjs.org',
-      'registry.npmjs.org',
-      'registry.yarnpkg.com',
-      'pypi.org',
-      '*.pypi.org',
-      'github.com',
-      '*.github.com',
-      'api.github.com',
-      'raw.githubusercontent.com',
-      'crates.io',
-      '*.crates.io',
-      'static.crates.io',
-    ],
+    allowedDomains: [],
     deniedDomains: [],
   },
   filesystem: {
     denyRead: ['/Users', '/home'],
-    allowRead: [
-      '.',
-      '/dev/null',
-      '~/.config/opencode',
-      '~/.config/git',
-      '~/.gitconfig',
-      '~/.local',
-      '~/.cargo',
-    ],
-    allowWrite: ['.', '/tmp', '/dev/null'],
-    denyWrite: ['.env', '.env.*', '*.pem', '*.key'],
+    allowRead: ['.', '~/.gitconfig', '/dev/null'],
+    allowWrite: ['.', '/dev/null'],
+    denyWrite: ['**/.env', '**/.env.*', '**/*.pem', '**/*.key'],
   },
 };
 
@@ -198,16 +217,30 @@ function normalizeOptions(options: PluginOptions | undefined): SandboxConfigOver
   return normalizeConfig(isRecord(options.config) ? options.config : options);
 }
 
+function mergeArray(base: string[], override?: string[]): string[] {
+  if (!override) return base;
+  return [...new Set([...base, ...override])];
+}
+
 function deepMerge(base: SandboxConfig, overrides: SandboxConfigOverrides): SandboxConfig {
+  const network = overrides.network;
+  const filesystem = overrides.filesystem;
+
   return {
     enabled: overrides.enabled ?? base.enabled,
     network: {
-      ...base.network,
-      ...overrides.network,
+      allowNetwork: network?.allowNetwork ?? base.network.allowNetwork,
+      allowLocalBinding: network?.allowLocalBinding ?? base.network.allowLocalBinding,
+      allowAllUnixSockets: network?.allowAllUnixSockets ?? base.network.allowAllUnixSockets,
+      allowUnixSockets: mergeArray(base.network.allowUnixSockets, network?.allowUnixSockets),
+      allowedDomains: mergeArray(base.network.allowedDomains, network?.allowedDomains),
+      deniedDomains: mergeArray(base.network.deniedDomains, network?.deniedDomains),
     },
     filesystem: {
-      ...base.filesystem,
-      ...overrides.filesystem,
+      denyRead: mergeArray(base.filesystem.denyRead, filesystem?.denyRead),
+      allowRead: mergeArray(base.filesystem.allowRead, filesystem?.allowRead),
+      allowWrite: mergeArray(base.filesystem.allowWrite, filesystem?.allowWrite),
+      denyWrite: mergeArray(base.filesystem.denyWrite, filesystem?.denyWrite),
     },
   };
 }
@@ -246,6 +279,33 @@ function expandPath(filePath: string, baseDirectory: string): string {
 function configuredShellPath(config: unknown): string | undefined {
   if (!isRecord(config)) return undefined;
   return typeof config.shell === 'string' ? config.shell : undefined;
+}
+
+function landstripBinaryPath(): string {
+  const filePath = realpathSync.native(binaryPath());
+  let probe = dirname(filePath);
+
+  while (true) {
+    const manifestPath = join(probe, 'package.json');
+    if (existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as unknown;
+        if (isRecord(manifest) && LANDSTRIP_PACKAGE_NAMES.has(String(manifest.name))) {
+          return filePath;
+        }
+      } catch {
+        // malformed package.json — continue walking to parent
+      }
+    }
+
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+
+  throw new Error(
+    `Refusing to use landstrip binary outside official @jarkkojs/landstrip packages: ${filePath}`,
+  );
 }
 
 function canonicalizePath(filePath: string, baseDirectory: string): string {
@@ -527,7 +587,7 @@ function evaluateDomainPermission(
 }
 
 function landstripVersion(): string | null {
-  const result = spawnSync(binaryPath(), ['--version'], { encoding: 'utf-8' });
+  const result = spawnSync(landstripBinaryPath(), ['--version'], { encoding: 'utf-8' });
   if (result.status !== 0) return null;
   return result.stdout.trim();
 }
@@ -564,25 +624,19 @@ function parseLandstripErrors(output: string): LandstripErrorResponse[] {
       if (key.length > 0 && value.length > 0) fields[key] = value;
     }
 
-    if (
-      fields.reason &&
-      ['Other', 'LaunchFailed', 'SetupFailed', 'Usage'].includes(fields.reason) &&
-      fields.source
-    ) {
+    if (fields.reason && isLandstripErrorReason(fields.reason)) {
       const error: LandstripErrorResponse = {
-        reason: fields.reason as LandstripErrorResponse['reason'],
-        source: fields.source,
+        reason: fields.reason,
       };
 
       if (fields.file) error.file = fields.file;
-      if (fields.program) error.program = fields.program;
-
-      if (
-        fields.type &&
-        ['filesystem', 'network', 'platform', 'launch', 'encoding'].includes(fields.type)
-      ) {
-        error.type = fields.type as LandstripErrorResponse['type'];
+      if (fields.operation && isLandstripOperation(fields.operation)) {
+        error.operation = fields.operation;
       }
+      if (fields.program) error.program = fields.program;
+      if (fields.source) error.source = fields.source;
+
+      if (fields.type && isLandstripErrorType(fields.type)) error.type = fields.type;
 
       errors.push(error);
     }
@@ -599,13 +653,16 @@ function formatLandstripErrors(errors: LandstripErrorResponse[]): string {
       if (err.file) {
         parts.push(` (${err.file})`);
       }
+      if (err.operation) {
+        parts.push(` ${err.operation}`);
+      }
       if (err.program) {
         parts.push(` ${err.program}`);
       }
       if (err.type) {
         parts.push(`:${err.type}`);
       }
-      parts.push(`: ${err.source}`);
+      if (err.source) parts.push(`: ${err.source}`);
 
       return parts.join('');
     })
@@ -838,12 +895,12 @@ function shellArgs(shell: string, command: string): string[] {
 function buildWrappedCommand(policyPath: string, shell: string, command: string): string {
   const args = ['-p', policyPath, ...shellArgs(shell, command)];
 
-  return [binaryPath(), ...args].map(shellQuote).join(' ');
+  return [landstripBinaryPath(), ...args].map(shellQuote).join(' ');
 }
 
 function isGeneratedWrappedCommand(command: string): boolean {
   return (
-    command.startsWith(`${shellQuote(binaryPath())} `) &&
+    command.startsWith(`${shellQuote(landstripBinaryPath())} `) &&
     command.includes(` ${shellQuote('-p')} `) &&
     command.includes('opencode-landstrip-')
   );
@@ -964,6 +1021,15 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
 
   function enforcePermission(callID: string, decision: SandboxPermissionDecision): void {
     if (decision.status === 'allow' || hasCallAllowance(callID, decision)) return;
+    client.tui
+      ?.showToast?.({
+        body: {
+          title: 'Sandbox blocked',
+          message: decision.message.slice(0, 120),
+          variant: 'error',
+        },
+      })
+      ?.catch?.(() => undefined);
     throw errorWithConfigPaths(directory, decision.message);
   }
 
@@ -995,7 +1061,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       '# Sandbox Configuration',
       '',
       `Status: ${sandboxDisabled ? 'disabled for this session' : 'active'}`,
-      `landstrip: ${binaryPath()}`,
+      `landstrip package binary: ${landstripBinaryPath()}`,
       '',
       'Config files:',
       `- project: ${projectPath}`,
@@ -1082,7 +1148,17 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       return landstripCheck;
     }
 
-    const version = landstripVersion();
+    let version: string | null;
+    try {
+      version = landstripVersion();
+    } catch (error) {
+      landstripCheck = {
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+      return landstripCheck;
+    }
+
     if (!version) {
       landstripCheck = {
         ok: false,
@@ -1094,7 +1170,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     if (!hasMinimumVersion(version, LANDSTRIP_VERSION)) {
       landstripCheck = {
         ok: false,
-        reason: `landstrip 0.11.0 or newer is required; found: ${version}`,
+        reason: `landstrip ${REQUIRED_LANDSTRIP_VERSION} or newer is required; found: ${version}`,
       };
       return landstripCheck;
     }
@@ -1107,7 +1183,14 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     if (sandboxDisabled) return null;
 
     const config = loadConfig(directory, optionOverrides);
-    if (!config.enabled) return null;
+    if (!config.enabled) {
+      await notifyOnce(
+        `not-configured:${directory}`,
+        'Sandbox is not configured — no sandbox.json5 found',
+        'info',
+      );
+      return null;
+    }
 
     const check = checkLandstrip();
     if (!check?.ok) {
@@ -1435,6 +1518,11 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       if (input.command.trim() === '/sandbox') {
         const config = loadConfig(directory, optionOverrides);
         pushCommandText(input, output, sandboxSummary(config));
+        await client.tui
+          ?.showToast?.({
+            body: { title: 'Sandbox', message: `Config loaded for ${directory}`, variant: 'info' },
+          })
+          ?.catch?.(() => undefined);
         return;
       }
 
@@ -1453,6 +1541,15 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
           output,
           'Sandbox disabled for this session. Use /sandbox-enable to re-enable.',
         );
+        await client.tui
+          ?.showToast?.({
+            body: {
+              title: 'Sandbox',
+              message: 'Sandbox disabled for this session. Use /sandbox-enable to re-enable.',
+              variant: 'warning',
+            },
+          })
+          ?.catch?.(() => undefined);
         return;
       }
 
@@ -1466,7 +1563,30 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
           return;
         }
         sandboxDisabled = false;
-        pushCommandText(input, output, 'Sandbox re-enabled.');
+        const config = await activeConfig();
+        if (!config) {
+          pushCommandText(
+            input,
+            output,
+            'Sandbox re-enabled but no sandbox.json5 found — no rules active.\nCreate sandbox.json5 to enforce sandboxing.',
+          );
+          await client.tui
+            ?.showToast?.({
+              body: {
+                title: 'Sandbox',
+                message: 'Sandbox re-enabled but no sandbox.json5 found — no rules active.',
+                variant: 'warning',
+              },
+            })
+            ?.catch?.(() => undefined);
+        } else {
+          pushCommandText(input, output, 'Sandbox re-enabled.');
+          await client.tui
+            ?.showToast?.({
+              body: { title: 'Sandbox', message: 'Sandbox re-enabled.', variant: 'success' },
+            })
+            ?.catch?.(() => undefined);
+        }
         return;
       }
 
@@ -1482,6 +1602,15 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
         for (const path of extractCandidatePaths(shellCommand)) {
           const readDecision = evaluateReadPermission(path, config, directory, effectiveAllowRead);
           if (readDecision.status === 'deny') {
+            client.tui
+              ?.showToast?.({
+                body: {
+                  title: 'Sandbox blocked',
+                  message: readDecision.message.slice(0, 120),
+                  variant: 'error',
+                },
+              })
+              ?.catch?.(() => undefined);
             throw errorWithConfigPaths(directory, readDecision.message);
           }
 
@@ -1492,6 +1621,15 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
             effectiveAllowWrite,
           );
           if (writeDecision.status === 'deny') {
+            client.tui
+              ?.showToast?.({
+                body: {
+                  title: 'Sandbox blocked',
+                  message: writeDecision.message.slice(0, 120),
+                  variant: 'error',
+                },
+              })
+              ?.catch?.(() => undefined);
             throw errorWithConfigPaths(directory, writeDecision.message);
           }
         }
@@ -1507,6 +1645,15 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
               blockedDomain.reason === 'deniedDomains'
                 ? 'is blocked by network.deniedDomains'
                 : 'is not in network.allowedDomains';
+            client.tui
+              ?.showToast?.({
+                body: {
+                  title: 'Sandbox blocked',
+                  message: `Network access denied for "${blockedDomain.domain}"`,
+                  variant: 'error',
+                },
+              })
+              ?.catch?.(() => undefined);
             throw errorWithConfigPaths(
               directory,
               `Sandbox: network access denied for "${blockedDomain.domain}" (${reason}).`,

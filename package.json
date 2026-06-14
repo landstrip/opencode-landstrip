@@ -48,10 +48,10 @@
     "ci:test": "npm test"
   },
   "dependencies": {
-    "@jarkkojs/landstrip": "^0.11.0"
+    "@jarkkojs/landstrip": "^0.11.11"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.17.3",
+    "@opencode-ai/plugin": "^1.17.6",
     "@opentui/core": ">=0.3.4",
     "@opentui/keymap": ">=0.3.4",
     "@opentui/solid": ">=0.3.4",
@@ -61,7 +61,7 @@
     "typescript": "^5.8.2"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.17.3"
+    "@opencode-ai/plugin": "^1.17.6"
   },
   "peerDependenciesMeta": {
     "@opencode-ai/plugin": {
@@ -69,6 +69,6 @@
     }
   },
   "engines": {
-    "opencode": ">=1.17.3"
+    "opencode": ">=1.17.6"
   }
 }

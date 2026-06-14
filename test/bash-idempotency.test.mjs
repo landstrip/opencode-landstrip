@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import ts from 'typescript';
 
-async function withPlugin(options, run) {
+async function withPlugin(options, run, mock = {}) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const tempDir = await mkdtemp(join(tmpdir(), 'opencode-landstrip-test-'));
   const modulePath = join(tempDir, 'plugin.mjs');
@@ -28,21 +28,20 @@ async function withPlugin(options, run) {
     await writeFile(modulePath, compiled);
     process.env.HOME = home;
 
+    const landstripMockDir = join(tempDir, 'node_modules', '@jarkkojs', 'landstrip');
+    await mkdir(landstripMockDir, { recursive: true });
     const fakeLandstrip = join(
-      tempDir,
+      mock.externalBinary ? tempDir : landstripMockDir,
       process.platform === 'win32' ? 'landstrip.cmd' : 'landstrip',
     );
     await writeFile(
       fakeLandstrip,
       process.platform === 'win32'
-        ? '@echo landstrip 0.11.0\r\n'
-        : '#!/bin/sh\nprintf "landstrip 0.11.0\\n"\n',
+        ? '@echo landstrip 0.11.9\r\n'
+        : '#!/bin/sh\nprintf "landstrip 0.11.9\\n"\n',
     );
     if (process.platform !== 'win32') await chmod(fakeLandstrip, 0o755);
 
-    // Create a mock @jarkkojs/landstrip package in the temp directory
-    const landstripMockDir = join(tempDir, 'node_modules', '@jarkkojs', 'landstrip');
-    await mkdir(landstripMockDir, { recursive: true });
     await writeFile(
       join(landstripMockDir, 'package.json'),
       JSON.stringify({ name: '@jarkkojs/landstrip', type: 'module', main: './index.mjs' }),
@@ -113,6 +112,38 @@ test('bash wrapping is idempotent for repeated before hooks', async () => {
         await hooks['tool.execute.after'](input, { title: '', output: '', metadata: {} });
       }
     },
+  );
+});
+
+test('external landstrip binary is refused', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: {
+        allowRead: ['.'],
+        allowWrite: ['.'],
+        denyRead: [],
+        denyWrite: [],
+      },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks, messages }) => {
+      const output = {
+        args: {
+          command: 'git status --short',
+          description: 'Shows concise git status',
+        },
+      };
+
+      await hooks['tool.execute.before']({ callID: 'external-binary-call', tool: 'bash' }, output);
+
+      assert.equal(output.args.command, 'git status --short');
+      assert.match(
+        messages.join('\n'),
+        /Refusing to use landstrip binary outside official @jarkkojs\/landstrip packages/,
+      );
+    },
+    { externalBinary: true },
   );
 });
 
