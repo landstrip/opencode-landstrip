@@ -91,7 +91,7 @@ interface LandstripBashCallbacks {
   onErrorFd?: (data: Buffer) => void;
 }
 
-const LANDSTRIP_VERSION = [0, 11, 9] as const;
+const LANDSTRIP_VERSION = [0, 11, 11] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
 const LANDSTRIP_ERROR_REASONS = new Set<LandstripErrorReason>([
   'Other',
