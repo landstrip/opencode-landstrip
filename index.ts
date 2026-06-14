@@ -93,7 +93,7 @@ interface LandstripBashCallbacks {
   onErrorFd?: (data: Buffer) => void;
 }
 
-const LANDSTRIP_VERSION = [0, 11, 11] as const;
+const LANDSTRIP_VERSION = [0, 11, 13] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
 const LANDSTRIP_ERROR_REASONS = new Set<LandstripErrorReason>([
   'Other',
@@ -513,37 +513,34 @@ function extractBlockedWritePath(output: string, cwd: string): string | null {
 function parseLandstripErrors(output: string): LandstripErrorResponse[] {
   const errors: LandstripErrorResponse[] = [];
 
-  for (const block of output.trim().split(/\n\n+/)) {
-    const fields: Record<string, string> = {};
+  for (const line of output.trim().split('\n')) {
+    if (line.length === 0) continue;
 
-    for (const line of block.split('\n')) {
-      const colonIndex = line.indexOf(':');
-      if (colonIndex === -1) continue;
-      const key = line.slice(0, colonIndex).trim();
-      const value = line.slice(colonIndex + 1).trim();
-      if (key.length > 0 && value.length > 0) fields[key] = value;
-    }
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed !== 'object' || parsed === null) continue;
+      const obj = parsed as Record<string, unknown>;
 
-    if (
-      fields.reason &&
-      isLandstripErrorReason(fields.reason) &&
-      (fields.source || fields.reason === 'AccessDenied')
-    ) {
-      const error: LandstripErrorResponse = { reason: fields.reason };
+      const reason = obj.reason;
+      if (typeof reason !== 'string' || !isLandstripErrorReason(reason)) continue;
 
-      if (fields.source) error.source = fields.source;
-      if (fields.file) error.file = fields.file;
-      if (fields.program) error.program = fields.program;
+      const error: LandstripErrorResponse = { reason };
 
-      if (fields.operation && isLandstripOperation(fields.operation)) {
-        error.operation = fields.operation;
+      if (typeof obj.source === 'string') error.source = obj.source;
+      if (typeof obj.file === 'string') error.file = obj.file;
+      if (typeof obj.program === 'string') error.program = obj.program;
+
+      if (typeof obj.operation === 'string' && isLandstripOperation(obj.operation)) {
+        error.operation = obj.operation;
       }
 
-      if (fields.type && isLandstripErrorType(fields.type)) {
-        error.type = fields.type;
+      if (typeof obj.type === 'string' && isLandstripErrorType(obj.type)) {
+        error.type = obj.type;
       }
 
       errors.push(error);
+    } catch {
+      // Ignore non-JSON lines (e.g. stderr from child processes)
     }
   }
 
@@ -1141,7 +1138,17 @@ export function createLandstripIntegration(
         const allowNetwork = config.network.allowNetwork;
         const proxy = allowNetwork ? null : await startProxy(ctx, cwd);
         const policy = writePolicyFile(cwd, proxy?.port ?? null);
-        const landstripArgs = ['--error-fd', '3', '-p', policy.path, shell, ...args, command];
+        const landstripArgs = [
+          '--error-fd',
+          '3',
+          '--error-format',
+          'json',
+          '-p',
+          policy.path,
+          shell,
+          ...args,
+          command,
+        ];
 
         return new Promise((resolvePromise, reject) => {
           let timeoutHandle: NodeJS.Timeout | undefined;
