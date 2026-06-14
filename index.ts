@@ -62,14 +62,7 @@ interface SandboxConfig {
   filesystem: SandboxFilesystemConfig;
 }
 
-interface PiLandstripSettings {
-  [key: string]: unknown;
-  landstrip?: {
-    enabled?: boolean;
-  };
-}
-
-type PiSettingsScope = 'global' | 'project';
+type SandboxConfigScope = 'global' | 'project';
 
 interface LandstripPolicy {
   network: {
@@ -193,53 +186,6 @@ function loadConfig(cwd: string): SandboxConfig {
   return deepMerge(deepMerge(DEFAULT_CONFIG, globalConfig), projectConfig);
 }
 
-function getPiLandstripSettings(cwd: string): {
-  globalSettings: PiLandstripSettings;
-  projectSettings: PiLandstripSettings;
-} {
-  const settings = SettingsManager.create(cwd);
-  return {
-    globalSettings: settings.getGlobalSettings() as PiLandstripSettings,
-    projectSettings: settings.getProjectSettings() as PiLandstripSettings,
-  };
-}
-
-function isSandboxEnabledInPiSettings(cwd: string): boolean {
-  const { globalSettings, projectSettings } = getPiLandstripSettings(cwd);
-  return projectSettings.landstrip?.enabled ?? globalSettings.landstrip?.enabled ?? true;
-}
-
-function getPiSettingsWriteScope(cwd: string): PiSettingsScope {
-  const { projectSettings } = getPiLandstripSettings(cwd);
-  return projectSettings.landstrip?.enabled === undefined ? 'global' : 'project';
-}
-
-function getPiSettingsPath(cwd: string, scope: PiSettingsScope): string {
-  if (scope === 'project') return join(cwd, '.pi', 'settings.json');
-  return join(getAgentDir(), 'settings.json');
-}
-
-function readPiSettingsFile(settingsPath: string): PiLandstripSettings {
-  if (!existsSync(settingsPath)) return {};
-  return JSON.parse(readFileSync(settingsPath, 'utf-8')) as PiLandstripSettings;
-}
-
-async function setPiSettingsSandboxEnabled(
-  cwd: string,
-  enabled: boolean,
-): Promise<PiSettingsScope> {
-  const scope = getPiSettingsWriteScope(cwd);
-  const settingsPath = getPiSettingsPath(cwd, scope);
-  await withFileMutationQueue(settingsPath, async () => {
-    const settings = readPiSettingsFile(settingsPath);
-    settings.landstrip = { ...settings.landstrip, enabled };
-    mkdirSync(dirname(settingsPath), { recursive: true });
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
-  });
-
-  return scope;
-}
-
 function mergeArray(base: string[], override?: string[]): string[] {
   if (!override) return base;
   return [...new Set([...base, ...override])];
@@ -287,6 +233,25 @@ function readOrEmptyConfig(configPath: string): Partial<SandboxConfig> {
 function writeConfigFile(configPath: string, config: Partial<SandboxConfig>): void {
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+}
+
+function getSandboxConfigWriteTarget(cwd: string): { scope: SandboxConfigScope; path: string } {
+  const { globalPath, projectPath } = getConfigPaths(cwd);
+  const projectConfig = readOrEmptyConfig(projectPath);
+
+  if (projectConfig.enabled !== undefined) return { scope: 'project', path: projectPath };
+  return { scope: 'global', path: globalPath };
+}
+
+async function setSandboxConfigEnabled(cwd: string, enabled: boolean): Promise<SandboxConfigScope> {
+  const { scope, path } = getSandboxConfigWriteTarget(cwd);
+  await withFileMutationQueue(path, async () => {
+    const config = readOrEmptyConfig(path);
+    config.enabled = enabled;
+    writeConfigFile(path, config);
+  });
+
+  return scope;
 }
 
 async function addDomainToConfig(configPath: string, domain: string): Promise<void> {
@@ -1499,11 +1464,6 @@ export function createLandstripIntegration(
       return false;
     }
 
-    if (!isSandboxEnabledInPiSettings(ctx.cwd)) {
-      disableSandbox(ctx);
-      return false;
-    }
-
     const config = loadConfig(ctx.cwd);
     if (!config.enabled) {
       disableSandbox(ctx);
@@ -1634,12 +1594,6 @@ export function createLandstripIntegration(
         return;
       }
 
-      if (!isSandboxEnabledInPiSettings(ctx.cwd)) {
-        disableSandbox(ctx);
-        notify(ctx, 'Sandbox disabled via pi settings', 'info');
-        return;
-      }
-
       const config = loadConfig(ctx.cwd);
       if (!config.enabled) {
         disableSandbox(ctx);
@@ -1652,9 +1606,8 @@ export function createLandstripIntegration(
     maybePi.registerCommand?.('sandbox', {
       description: 'Show sandbox configuration',
       handler: async (_args, ctx) => {
-        let piSettingsEnabled = isSandboxEnabledInPiSettings(ctx.cwd);
+        let config = loadConfig(ctx.cwd);
 
-        const config = loadConfig(ctx.cwd);
         const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
 
         if (!ctx.hasUI) return;
@@ -1668,8 +1621,7 @@ export function createLandstripIntegration(
 
             function sandboxStatus(): { color: 'success' | 'warning'; label: string } {
               if (noSandboxFlag) return { color: 'warning', label: 'Disabled (--no-sandbox)' };
-              if (!piSettingsEnabled) return { color: 'warning', label: 'Disabled (Pi setting)' };
-              if (!config.enabled) return { color: 'warning', label: 'Disabled (config)' };
+              if (!config.enabled) return { color: 'warning', label: 'Disabled' };
               if (!sandboxEnabled || !sandboxReady) return { color: 'warning', label: 'Inactive' };
               return { color: 'success', label: 'Active' };
             }
@@ -1691,7 +1643,7 @@ export function createLandstripIntegration(
                 const row = (content: string) => makeRow(content, innerW, border);
                 const lines: string[] = [];
                 const status = sandboxStatus();
-                const toggleValue = piSettingsEnabled
+                const toggleValue = config.enabled
                   ? theme.fg('success', 'enabled')
                   : theme.fg('warning', 'disabled');
 
@@ -1721,7 +1673,7 @@ export function createLandstripIntegration(
                 const pathSnippet = text(truncateToWidth(binaryPath(), Math.max(20, innerW - 28)));
                 lines.push(
                   row(
-                    `${statusDot} ${text(status.label)} ${dim('·')} Pi setting ${toggleValue} ${dim('·')} ${muted('landstrip')} ${pathSnippet}`,
+                    `${statusDot} ${text(status.label)} ${dim('·')} persisted ${toggleValue} ${dim('·')} ${muted('landstrip')} ${pathSnippet}`,
                   ),
                 );
 
@@ -1753,7 +1705,9 @@ export function createLandstripIntegration(
 
                 lines.push(row(''));
                 lines.push(
-                  row(`${dim('t')} ${muted('toggle Pi setting')}  ${dim('esc')} ${muted('close')}`),
+                  row(
+                    `${dim('t')} ${muted('toggle persisted setting')}  ${dim('esc')} ${muted('close')}`,
+                  ),
                 );
                 lines.push(
                   `${borderFg('╰')}${borderFg('─'.repeat(Math.max(0, width - 2)))}${borderFg('╯')}`,
@@ -1769,24 +1723,24 @@ export function createLandstripIntegration(
                 }
 
                 void (async () => {
-                  const enabled = !piSettingsEnabled;
-                  const scope = await setPiSettingsSandboxEnabled(ctx.cwd, enabled);
-                  piSettingsEnabled = isSandboxEnabledInPiSettings(ctx.cwd);
+                  const enabled = !config.enabled;
+                  const scope = await setSandboxConfigEnabled(ctx.cwd, enabled);
+                  config = loadConfig(ctx.cwd);
 
                   if (!enabled) {
                     disableSandbox(ctx);
-                    notify(ctx, `Sandbox disabled via ${scope} Pi settings`, 'info');
+                    notify(ctx, `Sandbox disabled in ${scope} config`, 'info');
                   } else if (noSandboxFlag) {
                     notify(ctx, 'Sandbox remains disabled via --no-sandbox', 'warning');
                   } else if (!config.enabled) {
                     notify(ctx, 'Sandbox remains disabled via config', 'info');
                   } else if (enableSandbox(ctx)) {
-                    notify(ctx, `Sandbox enabled via ${scope} Pi settings`, 'info');
+                    notify(ctx, `Sandbox enabled in ${scope} config`, 'info');
                   }
 
                   tui.requestRender();
                 })().catch((error: unknown) => {
-                  notify(ctx, `Could not update Pi settings: ${error}`, 'error');
+                  notify(ctx, `Could not update config: ${error}`, 'error');
                 });
               },
 

@@ -23,22 +23,20 @@ Project config takes precedence.
 
 See [`sandbox.json`](./sandbox.json) for a starter config.
 
-Use Pi settings to toggle sandboxing:
+Use sandbox config to toggle sandboxing:
 
 ```json
 {
-  "landstrip": {
-    "enabled": false
-  }
+  "enabled": false
 }
 ```
 
-Project Pi settings override global Pi settings.
-The `/sandbox` UI updates the project setting when present, otherwise the global setting.
+Project config overrides global config.
+The `/sandbox` UI updates the project config when present, otherwise the global config.
 
 ## Usage
 
-Use `/sandbox` inside Pi to show the active config and toggle the Pi setting.
+Use `/sandbox` inside Pi to show the active config and toggle sandboxing.
 
 ## License
 
