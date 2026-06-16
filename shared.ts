@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) Jarkko Sakkinen 2026
 
-import { binaryPath } from '@jarkkojs/landstrip';
+import { binaryPath } from '@landstrip/landstrip';
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -54,11 +54,11 @@ export const DEFAULT_CONFIG: SandboxConfig = {
 };
 
 const LANDSTRIP_PACKAGE_NAMES = new Set([
-  '@jarkkojs/landstrip',
-  '@jarkkojs/landstrip-darwin-arm64',
-  '@jarkkojs/landstrip-darwin-x64',
-  '@jarkkojs/landstrip-linux-x64',
-  '@jarkkojs/landstrip-win32-x64',
+  '@landstrip/landstrip',
+  '@landstrip/landstrip-darwin-arm64',
+  '@landstrip/landstrip-darwin-x64',
+  '@landstrip/landstrip-linux-x64',
+  '@landstrip/landstrip-win32-x64',
 ]);
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -227,7 +227,7 @@ export function landstripBinaryPath(): string {
   }
 
   throw new Error(
-    `Refusing to use landstrip binary outside official @jarkkojs/landstrip packages: ${filePath}`,
+    `Refusing to use landstrip binary outside official @landstrip/landstrip packages: ${filePath}`,
   );
 }
 

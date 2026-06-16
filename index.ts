@@ -32,14 +32,12 @@ interface LandstripPolicy {
   filesystem: SandboxFilesystemConfig;
 }
 
-interface LandstripErrorResponse {
-  reason: 'Other' | 'AccessDenied' | 'LaunchFailed' | 'SetupFailed' | 'Usage';
-  file?: string;
-  operation?: 'read' | 'write';
-  program?: string;
-  type?: 'filesystem' | 'network' | 'platform' | 'launch' | 'encoding';
-  source?: string;
-}
+type LandstripTrap =
+  | { kind: 'Filesystem'; operation: 'read' | 'write'; path: string; mechanism: string }
+  | { kind: 'Network'; operation: string; target: string; mechanism: string }
+  | { kind: 'Launch'; program: string; message: string }
+  | { kind: 'Usage'; message: string }
+  | { kind: 'Internal'; fields: Record<string, string> };
 
 interface BashSandboxState {
   originalCommand: string;
@@ -60,40 +58,13 @@ interface SandboxPermissionDecision {
 
 type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 
-const LANDSTRIP_VERSION = [0, 11, 9] as const;
+const LANDSTRIP_VERSION = [0, 14, 0] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
-const LANDSTRIP_ERROR_REASONS = new Set<LandstripErrorResponse['reason']>([
-  'Other',
-  'AccessDenied',
-  'LaunchFailed',
-  'SetupFailed',
-  'Usage',
-]);
-const LANDSTRIP_OPERATIONS = new Set<NonNullable<LandstripErrorResponse['operation']>>([
-  'read',
-  'write',
-]);
-const LANDSTRIP_ERROR_TYPES = new Set<NonNullable<LandstripErrorResponse['type']>>([
-  'filesystem',
-  'network',
-  'platform',
-  'launch',
-  'encoding',
-]);
+const LANDSTRIP_OPERATIONS = new Set<'read' | 'write'>(['read', 'write']);
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
-function isLandstripErrorReason(value: string): value is LandstripErrorResponse['reason'] {
-  return LANDSTRIP_ERROR_REASONS.has(value as LandstripErrorResponse['reason']);
-}
-
-function isLandstripOperation(
-  value: string,
-): value is NonNullable<LandstripErrorResponse['operation']> {
-  return LANDSTRIP_OPERATIONS.has(value as NonNullable<LandstripErrorResponse['operation']>);
-}
-
-function isLandstripErrorType(value: string): value is NonNullable<LandstripErrorResponse['type']> {
-  return LANDSTRIP_ERROR_TYPES.has(value as NonNullable<LandstripErrorResponse['type']>);
+function isLandstripOperation(value: unknown): value is 'read' | 'write' {
+  return typeof value === 'string' && LANDSTRIP_OPERATIONS.has(value as 'read' | 'write');
 }
 
 function expandPath(filePath: string, baseDirectory: string): string {
@@ -242,13 +213,16 @@ function extractBlockedPath(
   );
   if (match) return normalizeBlockedPath(match[1], baseDirectory);
 
-  // Landstrip structured error format with file field
+  // Landstrip structured trap format carrying a denied path
   const landstripErrors = parseLandstripErrors(output);
-  for (const error of landstripErrors) {
-    if (error.file) return normalizeBlockedPath(error.file, baseDirectory);
+  for (const trap of landstripErrors) {
+    if (trap.kind === 'Filesystem') return normalizeBlockedPath(trap.path, baseDirectory);
+    if (trap.kind === 'Internal' && trap.fields.file) {
+      return normalizeBlockedPath(trap.fields.file, baseDirectory);
+    }
   }
 
-  // If landstrip reported an error but without a file field, try to
+  // If landstrip reported a trap but without a path, try to
   // extract the blocked path from the command itself
   if (landstripErrors.length > 0 && command) {
     for (const candidate of extractCandidatePaths(command)) {
@@ -396,63 +370,94 @@ function hasMinimumVersion(version: string, minimum: readonly [number, number, n
   return true;
 }
 
-function parseLandstripErrors(output: string): LandstripErrorResponse[] {
-  const errors: LandstripErrorResponse[] = [];
+function decodeLandstripTrap(value: unknown): LandstripTrap | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length !== 1) return null;
+  const [kind, payload] = entries[0];
 
-  for (const block of output.trim().split(/\n\n+/)) {
-    const fields: Record<string, string> = {};
-
-    for (const line of block.split('\n')) {
-      const colonIndex = line.indexOf(':');
-      if (colonIndex === -1) continue;
-      const key = line.slice(0, colonIndex).trim();
-      const value = line.slice(colonIndex + 1).trim();
-      if (key.length > 0 && value.length > 0) fields[key] = value;
+  switch (kind) {
+    case 'Filesystem': {
+      if (!Array.isArray(payload)) return null;
+      const [operation, path, mechanism] = payload;
+      if (!isLandstripOperation(operation) || typeof path !== 'string') return null;
+      return { kind, operation, path, mechanism: typeof mechanism === 'string' ? mechanism : '' };
     }
-
-    if (fields.reason && isLandstripErrorReason(fields.reason)) {
-      const error: LandstripErrorResponse = {
-        reason: fields.reason,
-      };
-
-      if (fields.file) error.file = fields.file;
-      if (fields.operation && isLandstripOperation(fields.operation)) {
-        error.operation = fields.operation;
+    case 'Network': {
+      if (!Array.isArray(payload)) return null;
+      const [operation, target, mechanism] = payload;
+      if (typeof operation !== 'string' || typeof target !== 'string') return null;
+      return { kind, operation, target, mechanism: typeof mechanism === 'string' ? mechanism : '' };
+    }
+    case 'Launch': {
+      if (!Array.isArray(payload)) return null;
+      const [program, message] = payload;
+      if (typeof program !== 'string') return null;
+      return { kind, program, message: typeof message === 'string' ? message : '' };
+    }
+    case 'Usage': {
+      if (typeof payload !== 'string') return null;
+      return { kind, message: payload };
+    }
+    case 'Internal': {
+      if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null;
+      const fields: Record<string, string> = {};
+      for (const [key, val] of Object.entries(payload as Record<string, unknown>)) {
+        fields[key] = typeof val === 'string' ? val : JSON.stringify(val);
       }
-      if (fields.program) error.program = fields.program;
-      if (fields.source) error.source = fields.source;
-
-      if (fields.type && isLandstripErrorType(fields.type)) error.type = fields.type;
-
-      errors.push(error);
+      return { kind, fields };
     }
+    default:
+      return null;
   }
-
-  return errors;
 }
 
-function formatLandstripErrors(errors: LandstripErrorResponse[]): string {
-  return errors
-    .map((err) => {
-      const parts: string[] = [`landstrip: ${err.reason}`];
+function parseLandstripErrors(output: string): LandstripTrap[] {
+  const traps: LandstripTrap[] = [];
 
-      if (err.file) {
-        parts.push(` (${err.file})`);
-      }
-      if (err.operation) {
-        parts.push(` ${err.operation}`);
-      }
-      if (err.program) {
-        parts.push(` ${err.program}`);
-      }
-      if (err.type) {
-        parts.push(`:${err.type}`);
-      }
-      if (err.source) parts.push(`: ${err.source}`);
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed[0] !== '{') continue;
 
-      return parts.join('');
-    })
-    .join('\n');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+
+    const trap = decodeLandstripTrap(parsed);
+    if (trap) traps.push(trap);
+  }
+
+  return traps;
+}
+
+function formatLandstripTrap(trap: LandstripTrap): string {
+  switch (trap.kind) {
+    case 'Filesystem':
+      return `landstrip: filesystem ${trap.operation} denied (${trap.path})${
+        trap.mechanism ? ` [${trap.mechanism}]` : ''
+      }`;
+    case 'Network':
+      return `landstrip: network ${trap.operation} denied (${trap.target})${
+        trap.mechanism ? ` [${trap.mechanism}]` : ''
+      }`;
+    case 'Launch':
+      return `landstrip: launch failed (${trap.program})${trap.message ? `: ${trap.message}` : ''}`;
+    case 'Usage':
+      return `landstrip: usage error: ${trap.message}`;
+    case 'Internal': {
+      const detail = Object.entries(trap.fields)
+        .map(([key, val]) => `${key}: ${val}`)
+        .join(', ');
+      return `landstrip: internal error${detail ? ` (${detail})` : ''}`;
+    }
+  }
+}
+
+function formatLandstripErrors(traps: LandstripTrap[]): string {
+  return traps.map(formatLandstripTrap).join('\n');
 }
 
 function splitHostPort(target: string, defaultPort: number): { host: string; port: number } | null {
@@ -948,7 +953,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     if (!version) {
       landstripCheck = {
         ok: false,
-        reason: `landstrip was not found. Reinstall with: npm install @jarkkojs/landstrip`,
+        reason: `landstrip was not found. Reinstall with: npm install @landstrip/landstrip`,
       };
       return landstripCheck;
     }

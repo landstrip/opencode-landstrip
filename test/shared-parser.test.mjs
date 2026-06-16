@@ -18,11 +18,11 @@ async function loadShared() {
     },
   }).outputText;
 
-  const landstripDir = join(tempDir, 'node_modules', '@jarkkojs', 'landstrip');
+  const landstripDir = join(tempDir, 'node_modules', '@landstrip', 'landstrip');
   await mkdir(landstripDir, { recursive: true });
   await writeFile(
     join(landstripDir, 'package.json'),
-    JSON.stringify({ name: '@jarkkojs/landstrip', type: 'module', main: './index.mjs' }),
+    JSON.stringify({ name: '@landstrip/landstrip', type: 'module', main: './index.mjs' }),
   );
   await writeFile(join(landstripDir, 'index.mjs'), 'export function binaryPath() { return ""; }');
 

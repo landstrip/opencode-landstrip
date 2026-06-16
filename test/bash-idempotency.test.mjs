@@ -32,7 +32,7 @@ async function withPlugin(options, run, mock = {}) {
     await writeFile(modulePath, compiled);
     process.env.HOME = home;
 
-    const landstripMockDir = join(tempDir, 'node_modules', '@jarkkojs', 'landstrip');
+    const landstripMockDir = join(tempDir, 'node_modules', '@landstrip', 'landstrip');
     await mkdir(landstripMockDir, { recursive: true });
     const fakeLandstrip = join(
       mock.externalBinary ? tempDir : landstripMockDir,
@@ -48,7 +48,7 @@ async function withPlugin(options, run, mock = {}) {
 
     await writeFile(
       join(landstripMockDir, 'package.json'),
-      JSON.stringify({ name: '@jarkkojs/landstrip', type: 'module', main: './index.mjs' }),
+      JSON.stringify({ name: '@landstrip/landstrip', type: 'module', main: './index.mjs' }),
     );
     await writeFile(
       join(landstripMockDir, 'index.mjs'),
@@ -144,7 +144,7 @@ test('external landstrip binary is refused', async () => {
       assert.equal(output.args.command, 'git status --short');
       assert.match(
         messages.join('\n'),
-        /Refusing to use landstrip binary outside official @jarkkojs\/landstrip packages/,
+        /Refusing to use landstrip binary outside official @landstrip\/landstrip packages/,
       );
     },
     { externalBinary: true },

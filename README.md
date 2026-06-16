@@ -1,7 +1,7 @@
 # opencode-landstrip
 
 Landlock-based sandboxing for [opencode](https://opencode.ai/) using
-[`landstrip`](https://github.com/jarkkojs/landstrip).
+[`landstrip`](https://github.com/landstrip/landstrip).
 
 ## Install
 
@@ -26,7 +26,7 @@ manually:
 
 `opencode plugin install opencode-landstrip` configures both entrypoints.
 
-This installs `opencode-landstrip` and its `@jarkkojs/landstrip` dependency, which
+This installs `opencode-landstrip` and its `@landstrip/landstrip` dependency, which
 includes platform-specific native binaries for Linux, macOS, and Windows.
 
 Requires OpenCode `1.17.7` or newer.
@@ -82,5 +82,5 @@ Set `enabled` to `false` in `sandbox.json`, or pass plugin options:
 `opencode-landstrip` is licensed under `MIT`. See [LICENSE](LICENSE) for more
 information.
 
-The bundled `@jarkkojs/landstrip` package is licensed separately as
+The bundled `@landstrip/landstrip` package is licensed separately as
 `Apache-2.0 AND LGPL-2.1-or-later`.

@@ -1,3 +1,3 @@
-declare module '@jarkkojs/landstrip' {
+declare module '@landstrip/landstrip' {
   function binaryPath(): string;
 }
