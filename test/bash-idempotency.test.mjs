@@ -323,6 +323,41 @@ test('proxy answers 502 instead of crashing when upstream is unreachable', async
   );
 });
 
+test('glob deny matches root and nested, single * stays in one segment', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: {
+        allowRead: ['.'],
+        allowWrite: ['.'],
+        denyRead: [],
+        denyWrite: ['**/.env', '*.kee'],
+      },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks, tempDir }) => {
+      const denied = [join(tempDir, '.env'), join(tempDir, 'config', '.env'), join(tempDir, 'a.kee')];
+      for (const path of denied) {
+        await assert.rejects(
+          hooks['tool.execute.before'](
+            { callID: `write-${path}`, tool: 'write' },
+            { args: { path } },
+          ),
+          /write access denied/,
+          path,
+        );
+      }
+
+      await assert.doesNotReject(
+        hooks['tool.execute.before'](
+          { callID: 'write-nested-kee', tool: 'write' },
+          { args: { path: join(tempDir, 'sub', 'a.kee') } },
+        ),
+      );
+    },
+  );
+});
+
 test('deny overrides allow when a path matches both lists', async () => {
   await withPlugin(
     {

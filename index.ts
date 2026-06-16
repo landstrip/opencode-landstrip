@@ -101,6 +101,38 @@ function canonicalizePath(filePath: string, baseDirectory: string): string {
   }
 }
 
+/**
+ * Translates an absolute glob pattern to a regular expression using standard
+ * path semantics: `**` crosses directory boundaries (and `**​/` may match zero
+ * segments), while a single `*` is confined to one path segment.
+ */
+function globToRegExp(globPattern: string): RegExp {
+  let regex = '';
+
+  for (let i = 0; i < globPattern.length; i++) {
+    const char = globPattern[i];
+    if (char === '*') {
+      if (globPattern[i + 1] === '*') {
+        i++;
+        if (globPattern[i + 1] === '/') {
+          i++;
+          regex += '(?:.*/)?';
+        } else {
+          regex += '.*';
+        }
+      } else {
+        regex += '[^/]*';
+      }
+    } else if (/[.+^${}()|[\]\\]/.test(char)) {
+      regex += `\\${char}`;
+    } else {
+      regex += char;
+    }
+  }
+
+  return new RegExp(`^${regex}$`);
+}
+
 function matchesPattern(filePath: string, patterns: string[], baseDirectory: string): boolean {
   const abs = canonicalizePath(filePath, baseDirectory);
 
@@ -110,8 +142,7 @@ function matchesPattern(filePath: string, patterns: string[], baseDirectory: str
       : canonicalizePath(pattern, baseDirectory);
 
     if (pattern.includes('*')) {
-      const escaped = absPattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-      return new RegExp(`^${escaped}$`).test(abs);
+      return globToRegExp(absPattern).test(abs);
     }
 
     const sep = absPattern.endsWith('/') ? '' : '/';
