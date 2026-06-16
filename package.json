@@ -11,7 +11,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jarkkojs/pi-landstrip.git"
+    "url": "git+https://github.com/landstrip/pi-landstrip.git"
   },
   "files": [
     "index.ts",
@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "^0.78.0",
-    "@jarkkojs/landstrip": "^0.12.3"
+    "@landstrip/landstrip": "^0.14.5"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.0",

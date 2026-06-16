@@ -3,7 +3,7 @@
 ![pi-landstrip screenshot](screenshot.png)
 
 Landlock-based sandboxing for [pi](https://pi.dev/) using
-[`landstrip`](https://github.com/jarkkojs/landstrip).
+[`landstrip`](https://github.com/landstrip/landstrip).
 
 ## Install
 
@@ -11,7 +11,7 @@ Landlock-based sandboxing for [pi](https://pi.dev/) using
 pi install npm:pi-landstrip
 ```
 
-This installs `pi-landstrip` and its `@jarkkojs/landstrip` dependency, which
+This installs `pi-landstrip` and its `@landstrip/landstrip` dependency, which
 includes platform-specific native binaries for Linux, macOS, and Windows.
 
 On unsupported platforms the extension loads but leaves sandboxing disabled.
@@ -43,5 +43,5 @@ Use `/sandbox` inside Pi to show the active config and toggle sandboxing.
 `pi-landstrip` is licensed under `MIT`. See [LICENSE](LICENSE) for more
 information.
 
-The bundled `@jarkkojs/landstrip` package is licensed under
+The bundled `@landstrip/landstrip` package is licensed under
 `Apache-2.0 AND LGPL-2.1-or-later`.
