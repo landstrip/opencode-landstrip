@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -277,6 +278,44 @@ test('permission.ask can approve one bash domain for wrapping policy', async () 
 
         assert.notEqual(output.args.command, 'curl https://example.com');
         assert.equal(output.args.description, 'Fetch example (landstrip)');
+      } finally {
+        await hooks['tool.execute.after'](input, { title: '', output: '', metadata: {} });
+      }
+    },
+  );
+});
+
+test('proxy answers 502 instead of crashing when upstream is unreachable', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: { allowRead: ['.'], allowWrite: ['.'], denyRead: [], denyWrite: [] },
+      network: { allowNetwork: false, allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks }) => {
+      const input = { callID: 'proxy-call', tool: 'bash' };
+      const args = { command: 'curl https://example.com' };
+      await hooks['tool.execute.before'](input, { args });
+
+      const env = {};
+      await hooks['shell.env'](input, { env });
+      const port = Number(new URL(env.HTTP_PROXY).port);
+
+      try {
+        const response = await new Promise((resolveResponse, rejectResponse) => {
+          const socket = connect(port, '127.0.0.1', () => {
+            socket.write('CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n');
+          });
+          let data = '';
+          socket.setEncoding('utf-8');
+          socket.on('data', (chunk) => {
+            data += chunk;
+          });
+          socket.on('close', () => resolveResponse(data));
+          socket.on('error', rejectResponse);
+        });
+
+        assert.match(response, /^HTTP\/1\.1 502 Bad Gateway/);
       } finally {
         await hooks['tool.execute.after'](input, { title: '', output: '', metadata: {} });
       }

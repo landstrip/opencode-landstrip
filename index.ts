@@ -547,9 +547,14 @@ function startProxy(config: SandboxConfig): Promise<{ port: number; stop: () => 
       return;
     }
 
+    let connected = false;
     const upstream = connectNet(endpoint.port, endpoint.host, () => {
+      connected = true;
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       pipeSockets(client, upstream, rest);
+    });
+    upstream.on('error', () => {
+      if (!connected) denyProxyRequest(client, '502 Bad Gateway');
     });
   }
 
@@ -589,9 +594,14 @@ function startProxy(config: SandboxConfig): Promise<{ port: number; stop: () => 
     const rewrittenHeader = lines
       .filter((line) => !line.toLowerCase().startsWith('proxy-connection:'))
       .join('\r\n');
+    let connected = false;
     const upstream = connectNet(port, url.hostname, () => {
+      connected = true;
       upstream.write(`${rewrittenHeader}\r\n\r\n`);
       pipeSockets(client, upstream, rest);
+    });
+    upstream.on('error', () => {
+      if (!connected) denyProxyRequest(client, '502 Bad Gateway');
     });
   }
 
