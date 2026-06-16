@@ -58,7 +58,7 @@ interface SandboxPermissionDecision {
 
 type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 
-const LANDSTRIP_VERSION = [0, 14, 0] as const;
+const LANDSTRIP_VERSION = [0, 14, 5] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
 const LANDSTRIP_OPERATIONS = new Set<'read' | 'write'>(['read', 'write']);
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
@@ -271,10 +271,6 @@ function evaluateReadPermission(
 ): SandboxPermissionDecision {
   const filePath = canonicalizePath(path, baseDirectory);
 
-  if (!shouldPromptForRead(filePath, effectiveAllowRead, baseDirectory)) {
-    return { status: 'allow', kind: 'read', resource: filePath, message: '' };
-  }
-
   if (isBlockedByDenyRead(filePath, config, baseDirectory)) {
     return {
       status: 'deny',
@@ -282,6 +278,10 @@ function evaluateReadPermission(
       resource: filePath,
       message: `Sandbox: read access denied for "${filePath}" (denyRead overrides allowRead).`,
     };
+  }
+
+  if (!shouldPromptForRead(filePath, effectiveAllowRead, baseDirectory)) {
+    return { status: 'allow', kind: 'read', resource: filePath, message: '' };
   }
 
   return {
@@ -300,10 +300,6 @@ function evaluateWritePermission(
 ): SandboxPermissionDecision {
   const filePath = canonicalizePath(path, baseDirectory);
 
-  if (!shouldPromptForWrite(filePath, effectiveAllowWrite, baseDirectory)) {
-    return { status: 'allow', kind: 'write', resource: filePath, message: '' };
-  }
-
   if (matchesPattern(filePath, config.filesystem.denyWrite, baseDirectory)) {
     return {
       status: 'deny',
@@ -311,6 +307,10 @@ function evaluateWritePermission(
       resource: filePath,
       message: `Sandbox: write access denied for "${filePath}" (in filesystem.denyWrite).`,
     };
+  }
+
+  if (!shouldPromptForWrite(filePath, effectiveAllowWrite, baseDirectory)) {
+    return { status: 'allow', kind: 'write', resource: filePath, message: '' };
   }
 
   return {

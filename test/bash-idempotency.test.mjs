@@ -41,8 +41,8 @@ async function withPlugin(options, run, mock = {}) {
     await writeFile(
       fakeLandstrip,
       process.platform === 'win32'
-        ? '@echo landstrip 0.11.9\r\n'
-        : '#!/bin/sh\nprintf "landstrip 0.11.9\\n"\n',
+        ? '@echo landstrip 0.14.5\r\n'
+        : '#!/bin/sh\nprintf "landstrip 0.14.5\\n"\n',
     );
     if (process.platform !== 'win32') await chmod(fakeLandstrip, 0o755);
 
@@ -280,6 +280,56 @@ test('permission.ask can approve one bash domain for wrapping policy', async () 
       } finally {
         await hooks['tool.execute.after'](input, { title: '', output: '', metadata: {} });
       }
+    },
+  );
+});
+
+test('deny overrides allow when a path matches both lists', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: {
+        allowRead: ['.'],
+        allowWrite: ['.'],
+        denyRead: ['**/.env'],
+        denyWrite: ['**/.env'],
+      },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks, tempDir }) => {
+      const filepath = join(tempDir, 'config', '.env');
+
+      const readOutput = { status: 'allow' };
+      await hooks['permission.ask'](
+        {
+          id: 'permission-read',
+          type: 'read',
+          pattern: filepath,
+          callID: 'read-call',
+          sessionID: 'session',
+          messageID: 'message',
+          title: 'Read file',
+          metadata: {},
+          time: { created: 0 },
+        },
+        readOutput,
+      );
+      assert.equal(readOutput.status, 'deny');
+      await assert.rejects(
+        hooks['tool.execute.before'](
+          { callID: 'read-call', tool: 'read' },
+          { args: { path: filepath } },
+        ),
+        /read access denied/,
+      );
+
+      await assert.rejects(
+        hooks['tool.execute.before'](
+          { callID: 'write-call', tool: 'write' },
+          { args: { path: filepath } },
+        ),
+        /write access denied/,
+      );
     },
   );
 });
