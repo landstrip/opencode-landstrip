@@ -358,9 +358,11 @@ export function decodeLandstripTrap(value: unknown): LandstripTrap | null {
     case 'filesystem': {
       const { operation, path } = value;
       if (!isLandstripOperation(operation) || typeof path !== 'string') return null;
+      const trap: LandstripTrap = { kind: 'filesystem', operation, path, mechanism };
       const state = decodeTrapState(value.state);
-      const queryId = typeof value.query_id === 'number' ? value.query_id : undefined;
-      return { kind: 'filesystem', operation, path, mechanism, state, queryId };
+      if (state) trap.state = state;
+      if (typeof value.query_id === 'number') trap.queryId = value.query_id;
+      return trap;
     }
     case 'network': {
       const { operation, target } = value;
