@@ -238,7 +238,7 @@ export function extractDomainsFromCommand(command: string): string[] {
   let match: RegExpExecArray | null;
 
   while ((match = urlRegex.exec(command)) !== null) {
-    domains.add(match[1]);
+    if (match[1]) domains.add(match[1]);
   }
 
   return [...domains];

@@ -6,6 +6,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "noUncheckedIndexedAccess": true,
     "types": ["node"]
   },
   "include": ["index.ts", "tui.ts", "shared.ts", "landstrip.d.ts"]

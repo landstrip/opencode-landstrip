@@ -102,11 +102,11 @@ function globToRegExp(globPattern: string): RegExp {
   let regex = '';
 
   for (let i = 0; i < globPattern.length; i++) {
-    const char = globPattern[i];
+    const char = globPattern.charAt(i);
     if (char === '*') {
-      if (globPattern[i + 1] === '*') {
+      if (globPattern.charAt(i + 1) === '*') {
         i++;
-        if (globPattern[i + 1] === '/') {
+        if (globPattern.charAt(i + 1) === '/') {
           i++;
           regex += '(?:.*/)?';
         } else {
@@ -222,19 +222,19 @@ function extractBlockedPath(
   let match = output.match(
     /(?:\/bin\/bash|bash|sh): (?:line \d+: )?([^:\n]+): (?:Operation not permitted|Permission denied)/,
   );
-  if (match) return normalizeBlockedPath(match[1], baseDirectory);
+  if (match?.[1]) return normalizeBlockedPath(match[1], baseDirectory);
 
   // ls/cat/cp: cannot open/access/stat '/path': Permission denied
   match = output.match(
     /^[a-zA-Z0-9_-]+: cannot (?:open|access|stat|create)(?: directory)? '?([^'\n]+?)'?(?: for (?:reading|writing))?: Permission denied$/m,
   );
-  if (match) return normalizeBlockedPath(match[1], baseDirectory);
+  if (match?.[1]) return normalizeBlockedPath(match[1], baseDirectory);
 
   // Generic: cmd: /absolute/path: Permission denied or Operation not permitted
   match = output.match(
     /^[a-zA-Z0-9_-]+: (\/[^\n:]+): (?:Operation not permitted|Permission denied)$/m,
   );
-  if (match) return normalizeBlockedPath(match[1], baseDirectory);
+  if (match?.[1]) return normalizeBlockedPath(match[1], baseDirectory);
 
   // Landstrip structured trap format carrying a denied path
   const landstripTraps = parseLandstripTraps(output);
@@ -390,8 +390,11 @@ function hasMinimumVersion(version: string, minimum: readonly [number, number, n
   if (!parsed) return false;
 
   for (let i = 0; i < minimum.length; i++) {
-    if (parsed[i] > minimum[i]) return true;
-    if (parsed[i] < minimum[i]) return false;
+    const parsedPart = parsed[i];
+    const minimumPart = minimum[i];
+    if (parsedPart === undefined || minimumPart === undefined) return false;
+    if (parsedPart > minimumPart) return true;
+    if (parsedPart < minimumPart) return false;
   }
 
   return true;
@@ -399,7 +402,7 @@ function hasMinimumVersion(version: string, minimum: readonly [number, number, n
 
 function splitHostPort(target: string, defaultPort: number): { host: string; port: number } | null {
   const bracketMatch = target.match(/^\[([^\]]+)\](?::(\d+))?$/);
-  if (bracketMatch) {
+  if (bracketMatch?.[1]) {
     return {
       host: bracketMatch[1],
       port: bracketMatch[2] ? Number(bracketMatch[2]) : defaultPort,
@@ -497,7 +500,13 @@ function startProxy(config: SandboxConfig): Promise<{ port: number; stop: () => 
 
   async function handleHttp(client: Socket, headerText: string, rest: Buffer): Promise<void> {
     const lines = headerText.split(/\r?\n/);
-    const [method, rawTarget, version] = lines[0].split(' ');
+    const requestLine = lines[0];
+    if (!requestLine) {
+      denyProxyRequest(client, '400 Bad Request');
+      return;
+    }
+
+    const [method, rawTarget, version] = requestLine.split(' ');
 
     if (!method || !rawTarget || !version) {
       denyProxyRequest(client, '400 Bad Request');
@@ -567,10 +576,10 @@ function startProxy(config: SandboxConfig): Promise<{ port: number; stop: () => 
       const header = buffered.subarray(0, headerEnd).toString('utf-8');
       const rest = buffered.subarray(headerEnd + 4);
       const firstLine = header.split(/\r?\n/, 1)[0];
-      const [method, target] = firstLine.split(' ');
+      const [method, target] = (firstLine ?? '').split(' ');
 
       const task =
-        method?.toUpperCase() === 'CONNECT'
+        method?.toUpperCase() === 'CONNECT' && target
           ? handleConnect(client, target, rest)
           : handleHttp(client, header, rest);
       task.catch(() => denyProxyRequest(client, '502 Bad Gateway'));
@@ -724,13 +733,13 @@ function extractPatchPaths(patchText: string): string[] {
 
   for (const line of patchText.split(/\r?\n/)) {
     const fileMatch = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/);
-    if (fileMatch) {
+    if (fileMatch?.[1]) {
       paths.push(fileMatch[1].trim());
       continue;
     }
 
     const moveMatch = line.match(/^\*\*\* Move to: (.+)$/);
-    if (moveMatch) paths.push(moveMatch[1].trim());
+    if (moveMatch?.[1]) paths.push(moveMatch[1].trim());
   }
 
   return paths;
@@ -1025,7 +1034,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
 
     if (isGeneratedWrappedCommand(args.command as string)) {
       const policyMatch = (args.command as string).match(/\s'-p'\s+'([^']+)'/);
-      if (policyMatch && existsSync(policyMatch[1])) {
+      if (policyMatch?.[1] && existsSync(policyMatch[1])) {
         if (typeof args.description === 'string')
           args.description = landstripDescription(args.description);
         return;
