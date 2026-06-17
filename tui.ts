@@ -35,16 +35,17 @@ interface PendingPermission {
 
 type PermissionChoice = 'once' | 'session' | 'project' | 'global' | 'reject';
 
-type WriteChoice = 'once' | 'session' | 'project' | 'global' | 'deny';
+type QueryChoice = 'once' | 'session' | 'project' | 'global' | 'deny';
 
-// A landstrip write query held pending over the fd-3 socket. It shares the
-// dialog stack with permission prompts so the two never overlap, hence the
-// common `id`/`kind` shape.
-interface WriteQueryEntry {
-  kind: 'write-query';
+// A landstrip filesystem query (read or write) held pending over the fd-3
+// socket. It shares the dialog stack with permission prompts so the two never
+// overlap, hence the common `id`/`kind` shape.
+interface FsQueryEntry {
+  kind: 'fs-query';
   id: string;
   socket: NetSocket;
   queryId: number;
+  operation: 'read' | 'write';
   path: string;
 }
 
@@ -54,7 +55,7 @@ interface PermissionEntry {
   permission: PendingPermission;
 }
 
-type QueueEntry = PermissionEntry | WriteQueryEntry;
+type QueueEntry = PermissionEntry | FsQueryEntry;
 
 function list(values: string[]): string {
   return values.join(', ') || '(none)';
@@ -120,10 +121,11 @@ const tui: TuiPlugin = async (api, options, meta) => {
   // server regenerates the policy from on-disk config each run — so it affects
   // only live socket decisions, not the static policy.
   const sessionAllowedWritePaths = new Set<string>();
+  const sessionAllowedReadPaths = new Set<string>();
 
-  // Write queries still awaiting a response, so cleanup can release held
+  // Filesystem queries still awaiting a response, so cleanup can release held
   // syscalls instead of letting the child hang.
-  const liveQueries = new Set<WriteQueryEntry>();
+  const liveQueries = new Set<FsQueryEntry>();
 
   function pump(): void {
     if (activeId !== undefined) return;
@@ -131,7 +133,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
     while (next && resolved.has(next.id)) next = queue.shift();
     if (!next) return;
     if (next.kind === 'permission') showPermission(next.permission);
-    else showWriteQuery(next);
+    else showFsQuery(next);
   }
 
   function enqueueEntry(entry: QueueEntry): void {
@@ -267,49 +269,56 @@ const tui: TuiPlugin = async (api, options, meta) => {
     );
   }
 
-  function respondWriteQuery(socket: NetSocket, queryId: number, action: 'allow' | 'deny'): void {
+  function respondFsQuery(socket: NetSocket, queryId: number, action: 'allow' | 'deny'): void {
     if (!socket.destroyed) socket.write(JSON.stringify({ query_id: queryId, action }) + '\n');
   }
 
-  function resolveWriteQuery(entry: WriteQueryEntry, choice: WriteChoice): void {
+  function resolveFsQuery(entry: FsQueryEntry, choice: QueryChoice): void {
     if (resolved.has(entry.id)) return;
     const action = choice === 'deny' ? 'deny' : 'allow';
+    const verb = entry.operation === 'read' ? 'Read' : 'Write';
 
     try {
       if (action === 'allow') {
         if (choice === 'session') {
-          sessionAllowedWritePaths.add(entry.path);
+          const sessionPaths =
+            entry.operation === 'read' ? sessionAllowedReadPaths : sessionAllowedWritePaths;
+          sessionPaths.add(entry.path);
         } else if (choice === 'project' || choice === 'global') {
           const directory = api.state.path.directory || process.cwd();
           const { globalPath, projectPath } = getConfigPaths(directory);
           const update = updateForPermission({
-            permission: 'write',
+            permission: entry.operation,
             metadata: { filepath: entry.path },
           });
           if (update) writeConfigFile(choice === 'project' ? projectPath : globalPath, update);
         }
       }
 
-      respondWriteQuery(entry.socket, entry.queryId, action);
+      respondFsQuery(entry.socket, entry.queryId, action);
       api.ui.toast({
         title: 'Sandbox',
-        message: action === 'deny' ? `Write denied: ${entry.path}` : `Write allowed (${choice})`,
+        message:
+          action === 'deny' ? `${verb} denied: ${entry.path}` : `${verb} allowed (${choice})`,
         variant: action === 'deny' ? 'warning' : 'success',
       });
     } catch {
       // Persisting failed — still release the held syscall by denying it.
-      respondWriteQuery(entry.socket, entry.queryId, 'deny');
+      respondFsQuery(entry.socket, entry.queryId, 'deny');
     } finally {
       liveQueries.delete(entry);
       finishActive(entry.id);
     }
   }
 
-  function showWriteQuery(entry: WriteQueryEntry): void {
+  function showFsQuery(entry: FsQueryEntry): void {
     activeId = entry.id;
+    const verb = entry.operation === 'read' ? 'Read' : 'Write';
+    const noun = entry.operation;
+    const listName = entry.operation === 'read' ? 'allowRead' : 'allowWrite';
 
     void api.attention.notify({
-      title: 'Sandbox write blocked',
+      title: `Sandbox ${noun} blocked`,
       message: entry.path,
       sound: { name: 'permission' },
       notification: true,
@@ -322,48 +331,48 @@ const tui: TuiPlugin = async (api, options, meta) => {
 
     api.ui.dialog.replace(
       () =>
-        api.ui.DialogSelect<WriteChoice>({
-          title: 'Sandbox Write Blocked',
-          placeholder: `Write blocked: ${entry.path}`,
+        api.ui.DialogSelect<QueryChoice>({
+          title: `Sandbox ${verb} Blocked`,
+          placeholder: `${verb} blocked: ${entry.path}`,
           options: [
             {
               title: 'Allow once',
               value: 'once',
-              category: 'This write',
-              description: 'Permit this write and continue',
+              category: `This ${noun}`,
+              description: `Permit this ${noun} and continue`,
             },
             {
               title: 'Allow for session',
               value: 'session',
-              category: 'This write',
-              description: 'Permit writes to this path for the rest of this session',
+              category: `This ${noun}`,
+              description: `Permit ${noun}s to this path for the rest of this session`,
             },
             {
               title: 'Allow for project',
               value: 'project',
               category: 'Persist to sandbox.json',
-              description: 'Add to .opencode/sandbox.json allowWrite and permit',
+              description: `Add to .opencode/sandbox.json ${listName} and permit`,
             },
             {
               title: 'Allow globally',
               value: 'global',
               category: 'Persist to sandbox.json',
-              description: 'Add to ~/.config/opencode/sandbox.json allowWrite and permit',
+              description: `Add to ~/.config/opencode/sandbox.json ${listName} and permit`,
             },
             {
               title: 'Deny',
               value: 'deny',
               category: 'Deny',
-              description: 'Block this write',
+              description: `Block this ${noun}`,
             },
           ],
           onSelect: (option) => {
             selectionMade = true;
-            resolveWriteQuery(entry, option.value);
+            resolveFsQuery(entry, option.value);
           },
         }),
       () => {
-        if (!selectionMade) resolveWriteQuery(entry, 'deny');
+        if (!selectionMade) resolveFsQuery(entry, 'deny');
       },
     );
   }
@@ -408,26 +417,23 @@ const tui: TuiPlugin = async (api, options, meta) => {
           buffer = buffer.slice(newline + 1);
 
           for (const trap of parseLandstripTraps(line)) {
-            if (
-              trap.kind !== 'filesystem' ||
-              trap.state !== 'query' ||
-              trap.operation !== 'write'
-            ) {
-              continue;
-            }
+            if (trap.kind !== 'filesystem' || trap.state !== 'query') continue;
             if (typeof trap.queryId !== 'number' || seen.has(trap.queryId)) continue;
             seen.add(trap.queryId);
 
-            if (sessionAllowedWritePaths.has(trap.path)) {
-              respondWriteQuery(socket, trap.queryId, 'allow');
+            const sessionPaths =
+              trap.operation === 'read' ? sessionAllowedReadPaths : sessionAllowedWritePaths;
+            if (sessionPaths.has(trap.path)) {
+              respondFsQuery(socket, trap.queryId, 'allow');
               continue;
             }
 
-            const entry: WriteQueryEntry = {
-              kind: 'write-query',
-              id: `landstrip-write:${socketId}:${trap.queryId}`,
+            const entry: FsQueryEntry = {
+              kind: 'fs-query',
+              id: `landstrip-${trap.operation}:${socketId}:${trap.queryId}`,
               socket,
               queryId: trap.queryId,
+              operation: trap.operation,
               path: trap.path,
             };
             liveQueries.add(entry);
@@ -572,10 +578,10 @@ const tui: TuiPlugin = async (api, options, meta) => {
     unsubscribeAsked();
     unsubscribeReplied();
 
-    // Deny any still-held writes so the sandboxed children don't hang, then
+    // Deny any still-held queries so the sandboxed children don't hang, then
     // tear down the socket server and drop the discovery file.
     for (const entry of liveQueries) {
-      respondWriteQuery(entry.socket, entry.queryId, 'deny');
+      respondFsQuery(entry.socket, entry.queryId, 'deny');
       liveQueries.delete(entry);
     }
     for (const socket of sockets) socket.destroy();
