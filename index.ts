@@ -33,11 +33,11 @@ interface LandstripPolicy {
 }
 
 type LandstripTrap =
-  | { kind: 'Filesystem'; operation: 'read' | 'write'; path: string; mechanism: string }
-  | { kind: 'Network'; operation: string; target: string; mechanism: string }
-  | { kind: 'Launch'; program: string; message: string }
-  | { kind: 'Usage'; message: string }
-  | { kind: 'Internal'; fields: Record<string, string> };
+  | { kind: 'filesystem'; operation: 'read' | 'write'; path: string; mechanism: string }
+  | { kind: 'network'; operation: string; target: string; mechanism: string }
+  | { kind: 'launch'; program: string; message: string }
+  | { kind: 'usage'; message: string }
+  | { kind: 'internal'; detail: Record<string, string> };
 
 interface BashSandboxState {
   originalCommand: string;
@@ -58,7 +58,7 @@ interface SandboxPermissionDecision {
 
 type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 
-const LANDSTRIP_VERSION = [0, 14, 5] as const;
+const LANDSTRIP_VERSION = [0, 15, 1] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
 const LANDSTRIP_OPERATIONS = new Set<'read' | 'write'>(['read', 'write']);
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
@@ -247,9 +247,9 @@ function extractBlockedPath(
   // Landstrip structured trap format carrying a denied path
   const landstripErrors = parseLandstripErrors(output);
   for (const trap of landstripErrors) {
-    if (trap.kind === 'Filesystem') return normalizeBlockedPath(trap.path, baseDirectory);
-    if (trap.kind === 'Internal' && trap.fields.file) {
-      return normalizeBlockedPath(trap.fields.file, baseDirectory);
+    if (trap.kind === 'filesystem') return normalizeBlockedPath(trap.path, baseDirectory);
+    if (trap.kind === 'internal' && trap.detail.file) {
+      return normalizeBlockedPath(trap.detail.file, baseDirectory);
     }
   }
 
@@ -407,40 +407,39 @@ function hasMinimumVersion(version: string, minimum: readonly [number, number, n
 
 function decodeLandstripTrap(value: unknown): LandstripTrap | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const entries = Object.entries(value as Record<string, unknown>);
-  if (entries.length !== 1) return null;
-  const [kind, payload] = entries[0];
+  const record = value as Record<string, unknown>;
+  const mechanism = typeof record.mechanism === 'string' ? record.mechanism : '';
 
-  switch (kind) {
-    case 'Filesystem': {
-      if (!Array.isArray(payload)) return null;
-      const [operation, path, mechanism] = payload;
+  switch (record.kind) {
+    case 'filesystem': {
+      const { operation, path } = record;
       if (!isLandstripOperation(operation) || typeof path !== 'string') return null;
-      return { kind, operation, path, mechanism: typeof mechanism === 'string' ? mechanism : '' };
+      return { kind: 'filesystem', operation, path, mechanism };
     }
-    case 'Network': {
-      if (!Array.isArray(payload)) return null;
-      const [operation, target, mechanism] = payload;
+    case 'network': {
+      const { operation, target } = record;
       if (typeof operation !== 'string' || typeof target !== 'string') return null;
-      return { kind, operation, target, mechanism: typeof mechanism === 'string' ? mechanism : '' };
+      return { kind: 'network', operation, target, mechanism };
     }
-    case 'Launch': {
-      if (!Array.isArray(payload)) return null;
-      const [program, message] = payload;
+    case 'launch': {
+      const { program, message } = record;
       if (typeof program !== 'string') return null;
-      return { kind, program, message: typeof message === 'string' ? message : '' };
+      return { kind: 'launch', program, message: typeof message === 'string' ? message : '' };
     }
-    case 'Usage': {
-      if (typeof payload !== 'string') return null;
-      return { kind, message: payload };
+    case 'usage': {
+      const { message } = record;
+      if (typeof message !== 'string') return null;
+      return { kind: 'usage', message };
     }
-    case 'Internal': {
-      if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null;
-      const fields: Record<string, string> = {};
-      for (const [key, val] of Object.entries(payload as Record<string, unknown>)) {
-        fields[key] = typeof val === 'string' ? val : JSON.stringify(val);
+    case 'internal': {
+      const detail: Record<string, string> = {};
+      const payload = record.detail;
+      if (typeof payload === 'object' && payload !== null && !Array.isArray(payload)) {
+        for (const [key, val] of Object.entries(payload as Record<string, unknown>)) {
+          detail[key] = typeof val === 'string' ? val : JSON.stringify(val);
+        }
       }
-      return { kind, fields };
+      return { kind: 'internal', detail };
     }
     default:
       return null;
@@ -470,20 +469,20 @@ function parseLandstripErrors(output: string): LandstripTrap[] {
 
 function formatLandstripTrap(trap: LandstripTrap): string {
   switch (trap.kind) {
-    case 'Filesystem':
+    case 'filesystem':
       return `landstrip: filesystem ${trap.operation} denied (${trap.path})${
         trap.mechanism ? ` [${trap.mechanism}]` : ''
       }`;
-    case 'Network':
+    case 'network':
       return `landstrip: network ${trap.operation} denied (${trap.target})${
         trap.mechanism ? ` [${trap.mechanism}]` : ''
       }`;
-    case 'Launch':
+    case 'launch':
       return `landstrip: launch failed (${trap.program})${trap.message ? `: ${trap.message}` : ''}`;
-    case 'Usage':
+    case 'usage':
       return `landstrip: usage error: ${trap.message}`;
-    case 'Internal': {
-      const detail = Object.entries(trap.fields)
+    case 'internal': {
+      const detail = Object.entries(trap.detail)
         .map(([key, val]) => `${key}: ${val}`)
         .join(', ');
       return `landstrip: internal error${detail ? ` (${detail})` : ''}`;
