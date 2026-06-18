@@ -57,7 +57,7 @@ interface SandboxPermissionDecision {
 
 type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 
-const LANDSTRIP_VERSION = [0, 15, 9] as const;
+const LANDSTRIP_VERSION = [0, 15, 14] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
@@ -127,21 +127,37 @@ function globToRegExp(globPattern: string): RegExp {
   return new RegExp(`^${regex}$`);
 }
 
-function matchesPattern(filePath: string, patterns: string[], baseDirectory: string): boolean {
+// Component count of an absolute path; "/" is 0. Used to rank how specific a
+// matching pattern is so the most specific allow/deny rule wins.
+function pathDepth(absolutePath: string): number {
+  return absolutePath.split('/').filter((segment) => segment.length > 0).length;
+}
+
+// The depth of the most specific pattern that matches `filePath`, or -1 when
+// none match. A glob is anchored to the whole path, so it ranks at the path's
+// own depth; a literal pattern ranks at the depth of the prefix it covers.
+function matchDepth(filePath: string, patterns: string[], baseDirectory: string): number {
   const abs = canonicalizePath(filePath, baseDirectory);
+  let depth = -1;
 
-  return patterns.some((pattern) => {
-    const absPattern = pattern.includes('*')
-      ? expandPath(pattern, baseDirectory)
-      : canonicalizePath(pattern, baseDirectory);
-
+  for (const pattern of patterns) {
     if (pattern.includes('*')) {
-      return globToRegExp(absPattern).test(abs);
+      const absPattern = expandPath(pattern, baseDirectory);
+      if (globToRegExp(absPattern).test(abs)) depth = Math.max(depth, pathDepth(abs));
+    } else {
+      const absPattern = canonicalizePath(pattern, baseDirectory);
+      const sep = absPattern.endsWith('/') ? '' : '/';
+      if (abs === absPattern || abs.startsWith(absPattern + sep)) {
+        depth = Math.max(depth, pathDepth(absPattern));
+      }
     }
+  }
 
-    const sep = absPattern.endsWith('/') ? '' : '/';
-    return abs === absPattern || abs.startsWith(absPattern + sep);
-  });
+  return depth;
+}
+
+function matchesPattern(filePath: string, patterns: string[], baseDirectory: string): boolean {
+  return matchDepth(filePath, patterns, baseDirectory) >= 0;
 }
 
 function resolveFilesystemPatterns(patterns: string[], baseDirectory: string): string[] {
@@ -162,10 +178,6 @@ function resolveFilesystemConfig(
     allowWrite: resolveFilesystemPatterns(config.allowWrite, baseDirectory),
     denyWrite: resolveFilesystemPatterns(config.denyWrite, baseDirectory),
   };
-}
-
-function shouldPromptForRead(path: string, allowRead: string[], baseDirectory: string): boolean {
-  return allowRead.length === 0 || !matchesPattern(path, allowRead, baseDirectory);
 }
 
 function shouldPromptForWrite(path: string, allowWrite: string[], baseDirectory: string): boolean {
@@ -267,10 +279,6 @@ function extractBlockedWritePath(
   return extractBlockedPath(output, baseDirectory, command);
 }
 
-function isBlockedByDenyRead(path: string, config: SandboxConfig, baseDirectory: string): boolean {
-  return matchesPattern(path, config.filesystem.denyRead, baseDirectory);
-}
-
 function evaluateReadPermission(
   path: string,
   config: SandboxConfig,
@@ -278,8 +286,13 @@ function evaluateReadPermission(
   effectiveAllowRead: string[],
 ): SandboxPermissionDecision {
   const filePath = canonicalizePath(path, baseDirectory);
+  const allowDepth = matchDepth(filePath, effectiveAllowRead, baseDirectory);
+  const denyDepth = matchDepth(filePath, config.filesystem.denyRead, baseDirectory);
 
-  if (isBlockedByDenyRead(filePath, config, baseDirectory)) {
+  // The most specific rule wins, matching landstrip's read policy so the bash
+  // and read tools agree: a denyRead overrides allowRead only when it is more
+  // specific, while a tie or a more specific allowRead carves the path back in.
+  if (denyDepth > allowDepth) {
     return {
       status: 'deny',
       kind: 'read',
@@ -288,7 +301,7 @@ function evaluateReadPermission(
     };
   }
 
-  if (!shouldPromptForRead(filePath, effectiveAllowRead, baseDirectory)) {
+  if (allowDepth >= 0) {
     return { status: 'allow', kind: 'read', resource: filePath, message: '' };
   }
 

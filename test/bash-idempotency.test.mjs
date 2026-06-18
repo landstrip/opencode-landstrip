@@ -42,8 +42,8 @@ async function withPlugin(options, run, mock = {}) {
     await writeFile(
       fakeLandstrip,
       process.platform === 'win32'
-        ? '@echo landstrip 0.15.9\r\n'
-        : '#!/bin/sh\nprintf "landstrip 0.15.9\\n"\n',
+        ? '@echo landstrip 0.15.14\r\n'
+        : '#!/bin/sh\nprintf "landstrip 0.15.14\\n"\n',
     );
     if (process.platform !== 'win32') await chmod(fakeLandstrip, 0o755);
 
@@ -438,6 +438,35 @@ test('deny overrides allow when a path matches both lists', async () => {
           { args: { path: filepath } },
         ),
         /write access denied/,
+      );
+    },
+  );
+});
+
+test('a broad denyRead does not block reads inside an allowed project', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: { allowRead: ['.'], allowWrite: ['.'], denyRead: [tmpdir()], denyWrite: [] },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks, tempDir }) => {
+      // tempDir lives under tmpdir(); the more specific allowRead '.' wins over
+      // the broader denyRead, so project files stay readable.
+      await assert.doesNotReject(
+        hooks['tool.execute.before'](
+          { callID: 'read-inside', tool: 'read' },
+          { args: { path: join(tempDir, 'main.ts') } },
+        ),
+      );
+
+      // A path outside the project but under the same denyRead stays blocked.
+      await assert.rejects(
+        hooks['tool.execute.before'](
+          { callID: 'read-outside', tool: 'read' },
+          { args: { path: join(tmpdir(), 'opencode-landstrip-elsewhere', 'secret') } },
+        ),
+        /read access denied/,
       );
     },
   );
