@@ -42,8 +42,8 @@ async function withPlugin(options, run, mock = {}) {
     await writeFile(
       fakeLandstrip,
       process.platform === 'win32'
-        ? '@echo landstrip 0.15.14\r\n'
-        : '#!/bin/sh\nprintf "landstrip 0.15.14\\n"\n',
+        ? '@echo landstrip 0.16.4\r\n'
+        : '#!/bin/sh\nprintf "landstrip 0.16.4\\n"\n',
     );
     if (process.platform !== 'win32') await chmod(fakeLandstrip, 0o755);
 
