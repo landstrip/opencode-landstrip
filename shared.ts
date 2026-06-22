@@ -209,31 +209,43 @@ export function writeConfigFile(configPath: string, update: SandboxConfigOverrid
   writeFileSync(configPath, JSON.stringify(next, null, 2) + '\n');
 }
 
-export function landstripBinaryPath(): string {
-  const filePath = realpathSync.native(binaryPath());
-  let probe = dirname(filePath);
+let _landstripBinaryPath: string | undefined;
+let _landstripBinaryPathError: unknown;
 
-  while (true) {
-    const manifestPath = join(probe, 'package.json');
-    if (existsSync(manifestPath)) {
-      try {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as unknown;
-        if (isRecord(manifest) && LANDSTRIP_PACKAGE_NAMES.has(String(manifest.name))) {
-          return filePath;
+export function landstripBinaryPath(): string {
+  if (_landstripBinaryPath !== undefined) return _landstripBinaryPath;
+  if (_landstripBinaryPathError !== undefined) throw _landstripBinaryPathError;
+
+  try {
+    const filePath = realpathSync.native(binaryPath());
+    let probe = dirname(filePath);
+
+    while (true) {
+      const manifestPath = join(probe, 'package.json');
+      if (existsSync(manifestPath)) {
+        try {
+          const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as unknown;
+          if (isRecord(manifest) && LANDSTRIP_PACKAGE_NAMES.has(String(manifest.name))) {
+            _landstripBinaryPath = filePath;
+            return filePath;
+          }
+        } catch {
+          // malformed package.json — continue walking to parent
         }
-      } catch {
-        // malformed package.json — continue walking to parent
       }
+
+      const parent = dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
     }
 
-    const parent = dirname(probe);
-    if (parent === probe) break;
-    probe = parent;
+    throw new Error(
+      `Refusing to use landstrip binary outside official @landstrip/landstrip packages: ${filePath}`,
+    );
+  } catch (error) {
+    _landstripBinaryPathError = error;
+    throw error;
   }
-
-  throw new Error(
-    `Refusing to use landstrip binary outside official @landstrip/landstrip packages: ${filePath}`,
-  );
 }
 
 export function extractDomainsFromCommand(command: string): string[] {
