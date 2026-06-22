@@ -1007,12 +1007,15 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
   ): Promise<void> {
     if (typeof args.command !== 'string') return;
 
+    const rewriteDescription = (): void => {
+      if (typeof args.description === 'string') args.description = landstripDescription(args.description);
+    };
+
     const existing = activeBash.get(callID);
     if (existing) {
       if (args.command === existing.originalCommand || args.command === existing.wrappedCommand) {
         args.command = existing.wrappedCommand;
-        if (typeof args.description === 'string')
-          args.description = landstripDescription(args.description);
+        rewriteDescription();
         return;
       }
 
@@ -1022,8 +1025,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     if (isGeneratedWrappedCommand(args.command as string)) {
       const policyMatch = (args.command as string).match(/\s'-p'\s+'([^']+)'/);
       if (policyMatch?.[1] && existsSync(policyMatch[1])) {
-        if (typeof args.description === 'string')
-          args.description = landstripDescription(args.description);
+        rewriteDescription();
         return;
       }
       if (activeBash.has(callID)) await cleanupBash(callID);
@@ -1087,8 +1089,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     });
 
     args.command = wrappedCommand;
-    if (typeof args.description === 'string')
-      args.description = landstripDescription(args.description);
+    rewriteDescription();
   }
 
   const hooks: Hooks = {
