@@ -399,7 +399,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
 
     socketServer = createServer((socket) => {
       sockets.add(socket);
-      socket.setEncoding('utf8');
+      socket.setEncoding('utf-8');
       const socketId = ++socketSeq;
       const seen = new Set<number>();
       let buffer = '';
