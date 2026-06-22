@@ -995,6 +995,10 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     const state = activeBash.get(callID);
     if (!state) return;
 
+    for (const key of callAllowances) {
+      if (key.startsWith(`${callID}:`)) callAllowances.delete(key);
+    }
+
     activeBash.delete(callID);
     if (state.stop) await state.stop().catch(() => undefined);
     rmSync(state.policyDir, { recursive: true, force: true });
