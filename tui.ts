@@ -489,7 +489,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
   };
 
   const executeServerCommand = async (command: string): Promise<boolean> => {
-    await api.client.tui.executeCommand({ command });
+    await api.client.tui.executeCommand({ command: `/${command}` });
     return true;
   };
 
