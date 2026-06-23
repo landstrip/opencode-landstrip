@@ -1252,7 +1252,11 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     },
 
     'command.execute.before': async (input, output) => {
-      if (input.command.trim() === '/sandbox') {
+      // OpenCode strips the leading slash before dispatching commands, so the
+      // hook receives the bare name ("sandbox"); accept both forms so the
+      // handler matches whether invoked by name or via tui.executeCommand.
+      const command = input.command.trim().replace(/^\//, '');
+      if (command === 'sandbox') {
         const config = loadConfig(directory, optionOverrides);
         pushCommandText(input, output, buildSandboxSummary(config));
         await client.tui
@@ -1263,7 +1267,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
         return;
       }
 
-      if (input.command.trim() === '/sandbox-disable') {
+      if (command === 'sandbox-disable') {
         if (sandboxDisabled) {
           pushCommandText(
             input,
@@ -1290,7 +1294,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
         return;
       }
 
-      if (input.command.trim() === '/sandbox-enable') {
+      if (command === 'sandbox-enable') {
         if (!sandboxDisabled) {
           pushCommandText(
             input,

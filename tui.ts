@@ -593,4 +593,4 @@ const tui: TuiPlugin = async (api, options, meta) => {
 };
 
 export { tui };
-export default { tui };
+export default { id: 'opencode-landstrip', tui };
