@@ -188,9 +188,6 @@ function resolveFilesystemConfig(
   };
 }
 
-function shouldPromptForWrite(path: string, allowWrite: string[], baseDirectory: string): boolean {
-  return allowWrite.length === 0 || !matchesPattern(path, allowWrite, baseDirectory);
-}
 
 function domainMatchesPattern(domain: string, pattern: string): boolean {
   const normalizedDomain = domain.toLowerCase();
@@ -321,17 +318,19 @@ function evaluateWritePermission(
   effectiveAllowWrite: string[],
 ): SandboxPermissionDecision {
   const filePath = canonicalizePath(path, baseDirectory);
+  const allowDepth = matchDepth(filePath, effectiveAllowWrite, baseDirectory);
+  const denyDepth = matchDepth(filePath, config.filesystem.denyWrite, baseDirectory);
 
-  if (matchesPattern(filePath, config.filesystem.denyWrite, baseDirectory)) {
+  if (denyDepth > allowDepth) {
     return {
       status: 'deny',
       kind: 'write',
       resource: filePath,
-      message: `Sandbox: write access denied for "${filePath}" (in filesystem.denyWrite).`,
+      message: `Sandbox: write access denied for "${filePath}" (denyWrite overrides allowWrite).`,
     };
   }
 
-  if (!shouldPromptForWrite(filePath, effectiveAllowWrite, baseDirectory)) {
+  if (allowDepth >= 0) {
     return { status: 'allow', kind: 'write', resource: filePath, message: '' };
   }
 
