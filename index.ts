@@ -692,19 +692,29 @@ function landstripDescription(description: string): string {
 }
 
 function splitShellQuotedArgs(command: string): string[] {
-  const args: string[] = [];
-  let i = 0;
   while (i < command.length) {
     while (i < command.length && command[i] === ' ') i++;
     if (i >= command.length) break;
     if (command[i] === "'") {
       i++;
       let arg = '';
-      while (i < command.length && command[i] !== "'") {
+      while (i < command.length) {
+        if (command[i] === "'") {
+          if (
+            command[i + 1] === '\\' &&
+            command[i + 2] === "'" &&
+            command[i + 3] === "'"
+          ) {
+            arg += "'";
+            i += 4;
+            continue;
+          }
+          i++;
+          break;
+        }
         arg += command[i];
         i++;
       }
-      if (i < command.length) i++;
       args.push(arg);
     } else {
       let arg = '';
@@ -716,7 +726,6 @@ function splitShellQuotedArgs(command: string): string[] {
     }
   }
   return args;
-}
 
 function extractOriginalCommand(wrappedCommand: string): string | null {
   const args = splitShellQuotedArgs(wrappedCommand);
