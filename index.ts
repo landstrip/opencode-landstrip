@@ -267,9 +267,10 @@ function extractBlockedPath(
     }
   }
 
-  // If landstrip reported a trap but without a path, try to
-  // extract the blocked path from the command itself
-  if (landstripTraps.length > 0 && command) {
+  if (
+    landstripTraps.some((trap) => trap.kind === 'filesystem' || trap.kind === 'internal') &&
+    command
+  ) {
     for (const candidate of extractCandidatePaths(command)) {
       const resolved = canonicalizePath(candidate, baseDirectory);
       return resolved;
@@ -278,8 +279,6 @@ function extractBlockedPath(
 
   return null;
 }
-
-
 
 function evaluateReadPermission(
   path: string,
