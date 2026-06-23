@@ -506,16 +506,17 @@ test('query-response: bash wrapping injects fd 3 and stays idempotent', linuxOnl
           assert.match(wrapped, new RegExp(`/dev/tcp/127\\.0\\.0\\.1/${port}\\b`));
           assert.match(wrapped, /'--trap-fd' '3'/);
           assert.ok(wrapped.includes(' || '), 'has the plain fallback branch');
-          // One --trap-fd (socket branch only); two -p (socket + plain branches).
-          assert.equal(wrapped.match(/'--trap-fd'/g)?.length, 1);
-          assert.equal(wrapped.match(/'-p'/g)?.length, 2);
+          // Two --trap-fd (native /dev/tcp + bash -c fallback), three -p (both
+          // trapped branches + plain fallback).
+          assert.equal(wrapped.match(/'--trap-fd'/g)?.length, 2);
+          assert.equal(wrapped.match(/'-p'/g)?.length, 3);
           // The original command roundtrips cleanly into the socket branch.
           assert.ok(wrapped.includes("'-lc' 'git status --short'"));
 
           // Re-running the before hook must not double-wrap.
           await hooks['tool.execute.before'](input, output);
           assert.equal(output.args.command, wrapped);
-          assert.equal(wrapped.match(/\/dev\/tcp/g)?.length, 1);
+          assert.equal(wrapped.match(/\/dev\/tcp/g)?.length, 2);
 
           // A fresh call receiving the wrapped command (policy dir still present)
           // is recognized as already-generated and left intact.
@@ -558,7 +559,7 @@ test('query-response: recovery re-extracts the original command', linuxOnly, asy
           assert.notEqual(rewrapped, wrapped, 'a fresh policy dir is generated');
           // Extraction stopped at `||`: the original command is recovered whole,
           // not folded together with the old plain fallback branch.
-          assert.equal(rewrapped.match(/'--trap-fd'/g)?.length, 1);
+          assert.equal(rewrapped.match(/'--trap-fd'/g)?.length, 2);
           assert.ok(rewrapped.includes("'-lc' 'git status --short'"));
         } finally {
           await hooks['tool.execute.after'](inputB, { title: '', output: '', metadata: {} });

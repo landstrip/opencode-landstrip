@@ -665,12 +665,17 @@ function buildWrappedCommand(
   if (trapPort === null) return plain;
 
   // Connect fd 3 to the TUI's query-response socket BEFORE landstrip applies the
-  // sandbox, so a denied write can be approved live instead of forcing a re-run.
-  // The `&&`/`||` guard falls back to the plain (no --trap-fd) invocation when the
-  // redirect fails — a dead port, a non-bash outer shell without /dev/tcp, or an
-  // outer `set -e` — so a failed connect never hands the broker a dead fd 3.
+  // sandbox, so a denied filesystem access can be approved live instead of
+  // forcing a re-run.
+  //
+  // /dev/tcp is a bash/ksh built-in — it does not work in zsh, dash, or fish.
+  // We try the native redirect first (fast path when the host shell supports it)
+  // and fall back to an explicit bash invocation that always speaks /dev/tcp.
+  // If both fail (no bash, dead port, set -e in the outer shell) landstrip runs
+  // without --trap-fd so the toast-notify path still works.
   const trapped = [landstripBinaryPath(), '--trap-fd', '3', ...baseArgs].map(shellQuote).join(' ');
-  return `{ exec 3<>/dev/tcp/127.0.0.1/${trapPort} ; } 2>/dev/null && ${trapped} || ${plain}`;
+  const bashTrap = `bash -c ${shellQuote(`exec 3<>/dev/tcp/127.0.0.1/${trapPort} && exec "$@"`)} bash ${trapped}`;
+  return `{ exec 3<>/dev/tcp/127.0.0.1/${trapPort} ; } 2>/dev/null && ${trapped} || ${bashTrap} 2>/dev/null || ${plain}`;
 }
 
 function isGeneratedWrappedCommand(command: string): boolean {
