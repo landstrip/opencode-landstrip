@@ -279,13 +279,7 @@ function extractBlockedPath(
   return null;
 }
 
-function extractBlockedWritePath(
-  output: string,
-  baseDirectory: string,
-  command?: string,
-): string | null {
-  return extractBlockedPath(output, baseDirectory, command);
-}
+
 
 function evaluateReadPermission(
   path: string,
@@ -650,6 +644,15 @@ function shellArgs(shell: string, command: string): string[] {
 function socketQueryPort(baseDirectory: string): number | null {
   if (process.platform !== 'linux') return null;
   return readDiscoveryPort(baseDirectory);
+}
+
+async function awaitQueryPort(baseDirectory: string): Promise<number | null> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const port = socketQueryPort(baseDirectory);
+    if (port !== null) return port;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
 }
 
 function buildWrappedCommand(
@@ -1062,7 +1065,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       policy.path,
       configuredShell ?? process.env.SHELL ?? '/bin/sh',
       originalCommand,
-      socketQueryPort(directory),
+      await awaitQueryPort(directory),
     );
 
     activeBash.set(callID, {
@@ -1239,7 +1242,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
           ?.catch?.(() => undefined);
       }
 
-      const blockedPath = extractBlockedWritePath(outputText, directory, state.originalCommand);
+      const blockedPath = extractBlockedPath(outputText, directory, state.originalCommand);
       if (blockedPath) {
         await notifyOnce(
           `blocked:${blockedPath}`,
