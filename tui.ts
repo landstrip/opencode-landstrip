@@ -2,7 +2,10 @@
 // Copyright (C) Jarkko Sakkinen 2026
 
 import type { TuiPlugin, TuiSlotContext, TuiSlotPlugin } from '@opencode-ai/plugin/tui';
+import { realpathSync } from 'node:fs';
 import { type AddressInfo, createServer, type Socket as NetSocket } from 'node:net';
+import { homedir } from 'node:os';
+import { dirname } from 'node:path';
 
 import {
   getConfigPaths,
@@ -62,6 +65,54 @@ function permissionDetail(permission: PendingPermission): string {
   const label = permissionLabel(asRecord(permission));
   const resource = permissionResource(asRecord(permission));
   return resource && !label.includes(resource) ? `${label}: ${resource}` : label;
+}
+
+// Breadth-first filesystem approval: a held read/write under a directory tree
+// is approved for the broadest reasonable ancestor (e.g. `~/.cargo`, not each
+// subcrate file), so a single scan does not spawn one dialog per file. The
+// session set stores directory prefixes and is matched with separator-safe
+// prefix logic so a sibling file under an approved scope is auto-allowed.
+function pathUnderDirectory(filePath: string, dir: string): boolean {
+  if (filePath === dir) return true;
+  const sep = dir.endsWith('/') ? '' : '/';
+  return filePath.startsWith(dir + sep);
+}
+
+function sessionAllows(prefixes: Set<string>, filePath: string): boolean {
+  for (const prefix of prefixes) {
+    if (pathUnderDirectory(filePath, prefix)) return true;
+  }
+  return false;
+}
+
+// The broadest ancestor worth approving in one click: the immediate child of
+// `$HOME` (e.g. `~/.cargo`) for paths under the user's home, the project root
+// for paths under it, otherwise the containing directory. When the file sits
+// directly on a boundary (so the only ancestor is `$HOME` itself, which would
+// over-broaden), fall back to the exact file so nothing widens silently.
+function sessionScopeFor(filePath: string, baseDirectory: string): string {
+  const dir = dirname(filePath);
+  const home = homedir();
+  const boundaries = new Set<string>();
+  if (home) boundaries.add(home);
+  try {
+    const realHome = realpathSync.native(home);
+    if (realHome) boundaries.add(realHome);
+  } catch {
+    // $HOME not resolvable — fall back to the raw value only.
+  }
+
+  for (const boundary of boundaries) {
+    if (pathUnderDirectory(dir, boundary)) {
+      const rest = dir.slice(boundary.length).replace(/^\/+/, '');
+      const first = rest.split('/')[0];
+      if (!first) return filePath;
+      return boundary.endsWith('/') ? boundary + first : `${boundary}/${first}`;
+    }
+  }
+
+  if (pathUnderDirectory(dir, baseDirectory)) return baseDirectory;
+  return dir;
 }
 
 const tui: TuiPlugin = async (api, options, meta) => {
@@ -237,19 +288,23 @@ const tui: TuiPlugin = async (api, options, meta) => {
     if (resolved.has(entry.id)) return;
     const action = choice === 'deny' ? 'deny' : 'allow';
     const verb = entry.operation === 'read' ? 'Read' : 'Write';
+    const directory = api.state.path.directory || process.cwd();
+    const scope = sessionScopeFor(entry.path, directory);
+    const sessionPaths =
+      entry.operation === 'read' ? sessionAllowedReadPaths : sessionAllowedWritePaths;
 
     try {
       if (action === 'allow') {
-        if (choice === 'session') {
-          const sessionPaths =
-            entry.operation === 'read' ? sessionAllowedReadPaths : sessionAllowedWritePaths;
-          sessionPaths.add(entry.path);
-        } else if (choice === 'project' || choice === 'global') {
-          const directory = api.state.path.directory || process.cwd();
+        // Breadth-first: seed the session set with the broadest reasonable
+        // ancestor so the still-running command stops prompting for sibling
+        // files under the same tree. 'once' intentionally stays exact-path.
+        if (choice !== 'once') sessionPaths.add(scope);
+
+        if (choice === 'project' || choice === 'global') {
           const { globalPath, projectPath } = getConfigPaths(directory);
           const update = updateForPermission({
             permission: entry.operation,
-            metadata: { filepath: entry.path },
+            metadata: { filepath: scope },
           });
           if (update) writeConfigFile(choice === 'project' ? projectPath : globalPath, update);
         }
@@ -259,7 +314,9 @@ const tui: TuiPlugin = async (api, options, meta) => {
       api.ui.toast({
         title: 'Sandbox',
         message:
-          action === 'deny' ? `${verb} denied: ${entry.path}` : `${verb} allowed (${choice})`,
+          action === 'deny'
+            ? `${verb} denied: ${entry.path}`
+            : `${verb} allowed (${choice}) under ${scope}`,
         variant: action === 'deny' ? 'warning' : 'success',
       });
     } catch {
@@ -276,6 +333,8 @@ const tui: TuiPlugin = async (api, options, meta) => {
     const verb = entry.operation === 'read' ? 'Read' : 'Write';
     const noun = entry.operation;
     const listName = entry.operation === 'read' ? 'allowRead' : 'allowWrite';
+    const directory = api.state.path.directory || process.cwd();
+    const scope = sessionScopeFor(entry.path, directory);
 
     void api.attention.notify({
       title: `Sandbox ${noun} blocked`,
@@ -299,25 +358,25 @@ const tui: TuiPlugin = async (api, options, meta) => {
               title: 'Allow once',
               value: 'once',
               category: `This ${noun}`,
-              description: `Permit this ${noun} and continue`,
+              description: `Permit only this ${noun}`,
             },
             {
               title: 'Allow for session',
               value: 'session',
               category: `This ${noun}`,
-              description: `Permit ${noun}s to this path for the rest of this session`,
+              description: `Permit ${noun}s under ${scope} for this session`,
             },
             {
               title: 'Allow for project',
               value: 'project',
               category: 'Persist to sandbox.json',
-              description: `Add to .opencode/sandbox.json ${listName} and permit`,
+              description: `Add ${scope} to .opencode/sandbox.json ${listName}`,
             },
             {
               title: 'Allow globally',
               value: 'global',
               category: 'Persist to sandbox.json',
-              description: `Add to ~/.config/opencode/sandbox.json ${listName} and permit`,
+              description: `Add ${scope} to ~/.config/opencode/sandbox.json ${listName}`,
             },
             {
               title: 'Deny',
@@ -383,7 +442,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
 
             const sessionPaths =
               trap.operation === 'read' ? sessionAllowedReadPaths : sessionAllowedWritePaths;
-            if (sessionPaths.has(trap.path)) {
+            if (sessionAllows(sessionPaths, trap.path)) {
               respondFsQuery(socket, trap.queryId, 'allow');
               continue;
             }
