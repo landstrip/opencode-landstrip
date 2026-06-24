@@ -47,6 +47,52 @@ const LANDSTRIP_PACKAGE_NAMES = new Set([
   '@landstrip/landstrip-win32-x64',
 ]);
 
+// Breadth-first filesystem approval: a held read/write under a directory tree
+// is approved for the broadest reasonable ancestor (e.g. `~/.cargo`, not each
+// subcrate file), so a single approval covers sibling files under the same tree.
+export function pathUnderDirectory(filePath: string, dir: string): boolean {
+  if (filePath === dir) return true;
+  const sep = dir.endsWith('/') ? '' : '/';
+  return filePath.startsWith(dir + sep);
+}
+
+export function sessionAllows(prefixes: Set<string>, filePath: string): boolean {
+  for (const prefix of prefixes) {
+    if (pathUnderDirectory(filePath, prefix)) return true;
+  }
+  return false;
+}
+
+// The broadest ancestor worth approving in one click: the immediate child of
+// `$HOME` (e.g. `~/.cargo`) for paths under the user's home, the project root
+// for paths under it, otherwise the containing directory. When the file sits
+// directly on a boundary (so the only ancestor is `$HOME` itself, which would
+// over-broaden), fall back to the exact file so nothing widens silently.
+export function sessionScopeFor(filePath: string, baseDirectory: string): string {
+  const dir = dirname(filePath);
+  const home = homedir();
+  const boundaries = new Set<string>();
+  if (home) boundaries.add(home);
+  try {
+    const realHome = realpathSync.native(home);
+    if (realHome) boundaries.add(realHome);
+  } catch {
+    // $HOME not resolvable — fall back to the raw value only.
+  }
+
+  for (const boundary of boundaries) {
+    if (pathUnderDirectory(dir, boundary)) {
+      const rest = dir.slice(boundary.length).replace(/^\/+/, '');
+      const first = rest.split('/')[0];
+      if (!first) return filePath;
+      return boundary.endsWith('/') ? boundary + first : `${boundary}/${first}`;
+    }
+  }
+
+  if (pathUnderDirectory(dir, baseDirectory)) return baseDirectory;
+  return dir;
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

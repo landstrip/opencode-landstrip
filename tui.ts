@@ -2,10 +2,7 @@
 // Copyright (C) Jarkko Sakkinen 2026
 
 import type { TuiPlugin, TuiSlotContext, TuiSlotPlugin } from '@opencode-ai/plugin/tui';
-import { realpathSync } from 'node:fs';
 import { type AddressInfo, createServer, type Socket as NetSocket } from 'node:net';
-import { homedir } from 'node:os';
-import { dirname } from 'node:path';
 
 import {
   getConfigPaths,
@@ -15,7 +12,9 @@ import {
   permissionLabel,
   permissionResource,
   removeDiscoveryFile,
+  sessionAllows,
   sandboxSummary,
+  sessionScopeFor,
   updateForPermission,
   writeConfigFile,
   writeDiscoveryPort,
@@ -67,53 +66,6 @@ function permissionDetail(permission: PendingPermission): string {
   return resource && !label.includes(resource) ? `${label}: ${resource}` : label;
 }
 
-// Breadth-first filesystem approval: a held read/write under a directory tree
-// is approved for the broadest reasonable ancestor (e.g. `~/.cargo`, not each
-// subcrate file), so a single scan does not spawn one dialog per file. The
-// session set stores directory prefixes and is matched with separator-safe
-// prefix logic so a sibling file under an approved scope is auto-allowed.
-function pathUnderDirectory(filePath: string, dir: string): boolean {
-  if (filePath === dir) return true;
-  const sep = dir.endsWith('/') ? '' : '/';
-  return filePath.startsWith(dir + sep);
-}
-
-function sessionAllows(prefixes: Set<string>, filePath: string): boolean {
-  for (const prefix of prefixes) {
-    if (pathUnderDirectory(filePath, prefix)) return true;
-  }
-  return false;
-}
-
-// The broadest ancestor worth approving in one click: the immediate child of
-// `$HOME` (e.g. `~/.cargo`) for paths under the user's home, the project root
-// for paths under it, otherwise the containing directory. When the file sits
-// directly on a boundary (so the only ancestor is `$HOME` itself, which would
-// over-broaden), fall back to the exact file so nothing widens silently.
-function sessionScopeFor(filePath: string, baseDirectory: string): string {
-  const dir = dirname(filePath);
-  const home = homedir();
-  const boundaries = new Set<string>();
-  if (home) boundaries.add(home);
-  try {
-    const realHome = realpathSync.native(home);
-    if (realHome) boundaries.add(realHome);
-  } catch {
-    // $HOME not resolvable — fall back to the raw value only.
-  }
-
-  for (const boundary of boundaries) {
-    if (pathUnderDirectory(dir, boundary)) {
-      const rest = dir.slice(boundary.length).replace(/^\/+/, '');
-      const first = rest.split('/')[0];
-      if (!first) return filePath;
-      return boundary.endsWith('/') ? boundary + first : `${boundary}/${first}`;
-    }
-  }
-
-  if (pathUnderDirectory(dir, baseDirectory)) return baseDirectory;
-  return dir;
-}
 
 const tui: TuiPlugin = async (api, options, meta) => {
   const optionOverrides = normalizeOptions(options);

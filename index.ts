@@ -26,6 +26,7 @@ import {
   permissionType,
   readDiscoveryPort,
   sandboxSummary,
+  sessionScopeFor,
 } from './shared.js';
 
 interface LandstripPolicy {
@@ -768,6 +769,16 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
   const activeBash = new Map<string, BashSandboxState>();
   const notified = new Set<string>();
   const callAllowances = new Set<string>();
+  const sessionAllowedReadPaths = new Set<string>();
+  const sessionAllowedWritePaths = new Set<string>();
+
+  function getEffectiveAllowRead(config: SandboxConfig): string[] {
+    return [...config.filesystem.allowRead, ...sessionAllowedReadPaths];
+  }
+
+  function getEffectiveAllowWrite(config: SandboxConfig): string[] {
+    return [...config.filesystem.allowWrite, ...sessionAllowedWritePaths];
+  }
   let enabledNotified = false;
   let sandboxDisabled = false;
   let configuredShell: string | undefined;
@@ -1034,6 +1045,11 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     const effectiveConfig = {
       ...config,
       network: { ...config.network },
+      filesystem: {
+        ...config.filesystem,
+        allowRead: getEffectiveAllowRead(config),
+        allowWrite: getEffectiveAllowWrite(config),
+      },
     };
 
     if (!allowNetwork) {
@@ -1108,8 +1124,8 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       const patterns = permissionPatterns(request);
 
       const decisions: SandboxPermissionDecision[] = [];
-      const effectiveAllowRead = config.filesystem.allowRead;
-      const effectiveAllowWrite = config.filesystem.allowWrite;
+      const effectiveAllowRead = getEffectiveAllowRead(config);
+      const effectiveAllowWrite = getEffectiveAllowWrite(config);
 
       if (permission === 'read') {
         for (const pattern of patterns) {
@@ -1158,8 +1174,8 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       const config = await activeConfig();
       if (!config) return;
 
-      const effectiveAllowRead = config.filesystem.allowRead;
-      const effectiveAllowWrite = config.filesystem.allowWrite;
+      const effectiveAllowRead = getEffectiveAllowRead(config);
+      const effectiveAllowWrite = getEffectiveAllowWrite(config);
 
       if (input.tool === 'bash') {
         await prepareBash(input.callID, output.args, config);
@@ -1250,9 +1266,19 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
 
       const blockedPath = extractBlockedPath(outputText, directory, state.originalCommand);
       if (blockedPath) {
+        let blockedOperation: 'read' | 'write' = 'read';
+        for (const trap of errors) {
+          if (trap.kind === 'filesystem') {
+            blockedOperation = trap.operation;
+            break;
+          }
+        }
+        const scope = sessionScopeFor(blockedPath, directory);
+        if (blockedOperation === 'read') sessionAllowedReadPaths.add(scope);
+        else sessionAllowedWritePaths.add(scope);
         await notifyOnce(
           `blocked:${blockedPath}`,
-          `Sandbox blocked access to "${blockedPath}". Approve the related OpenCode permission prompt and retry if needed.`,
+          `Sandbox blocked ${blockedOperation} to "${blockedPath}". Added "${scope}" to session allowlist; retry the command.`,
           'warning',
         );
       }
@@ -1346,8 +1372,8 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
         const config = await activeConfig();
         if (!config) return;
 
-        const effectiveAllowRead = config.filesystem.allowRead;
-        const effectiveAllowWrite = config.filesystem.allowWrite;
+        const effectiveAllowRead = getEffectiveAllowRead(config);
+        const effectiveAllowWrite = getEffectiveAllowWrite(config);
 
         for (const path of extractCandidatePaths(shellCommand)) {
           const readDecision = evaluateReadPermission(path, config, directory, effectiveAllowRead);
