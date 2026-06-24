@@ -66,7 +66,6 @@ function permissionDetail(permission: PendingPermission): string {
   return resource && !label.includes(resource) ? `${label}: ${resource}` : label;
 }
 
-
 const tui: TuiPlugin = async (api, options, meta) => {
   const optionOverrides = normalizeOptions(options);
 
