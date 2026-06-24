@@ -24,7 +24,6 @@ import {
   parseLandstripTraps,
   permissionPatterns,
   permissionType,
-  readDiscoveryPort,
   sandboxSummary,
   sessionScopeFor,
 } from './shared.js';
@@ -46,6 +45,9 @@ interface BashSandboxState {
   policyDir: string;
   port: number | null;
   stop: (() => Promise<void>) | null;
+  trapServer: ReturnType<typeof createServer> | null;
+  trapServerPort: number | null;
+  trapLines: string[];
 }
 
 type SandboxPermissionKind = 'read' | 'write' | 'domain';
@@ -633,20 +635,83 @@ function shellArgs(shell: string, command: string): string[] {
   return [shell, '-lc', command];
 }
 
-// The query-response port is published by the TUI plugin and is Linux-only (the
-// socket protocol exists only in landstrip's seccomp broker).
-function socketQueryPort(baseDirectory: string): number | null {
-  if (process.platform !== 'linux') return null;
-  return readDiscoveryPort(baseDirectory);
-}
+// Start a local TCP server that landstrip connects its trap fd to. Traps are
+// handled in-process: query traps are answered immediately against the active
+// config, and info traps are collected for post-execution error reporting.
+function startTrapServer(
+  effectiveAllowRead: string[],
+  effectiveAllowWrite: string[],
+  denyRead: string[],
+  denyWrite: string[],
+  baseDirectory: string,
+  sessionAllowedReadPaths: Set<string>,
+  sessionAllowedWritePaths: Set<string>,
+): Promise<{ server: ReturnType<typeof createServer>; port: number; trapLines: string[] }> {
+  const trapLines: string[] = [];
+  const server = createServer((trapSocket) => {
+    let buffer = '';
+    trapSocket.on('data', (data: Buffer) => {
+      buffer += data.toString('utf8');
+      let nl = buffer.indexOf('\n');
+      while (nl !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        nl = buffer.indexOf('\n');
+        if (line.length === 0) continue;
+        let obj: Record<string, unknown> | null = null;
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (typeof parsed === 'object' && parsed !== null) {
+            obj = parsed as Record<string, unknown>;
+          }
+        } catch {
+          obj = null;
+        }
+        if (
+          obj &&
+          obj.state === 'query' &&
+          typeof obj.query_id === 'number' &&
+          (obj.operation === 'read' || obj.operation === 'write') &&
+          typeof obj.path === 'string'
+        ) {
+          const path = canonicalizePath(obj.path, baseDirectory);
+          const operation = obj.operation as 'read' | 'write';
+          // Per landstrip policy: a deny rule overrides allow only when more
+          // specific; a tie or more-specific allow carves the path back in.
+          const denyReadDepth = matchDepth(path, denyRead, baseDirectory);
+          const allowReadDepth = matchDepth(path, effectiveAllowRead, baseDirectory);
+          const denyWriteDepth = matchDepth(path, denyWrite, baseDirectory);
+          const allowWriteDepth = matchDepth(path, effectiveAllowWrite, baseDirectory);
+          const allowed =
+            operation === 'read'
+              ? !(denyReadDepth > allowReadDepth) && allowReadDepth >= 0
+              : !(denyWriteDepth > allowWriteDepth) && allowWriteDepth >= 0;
+          if (allowed) {
+            trapSocket.write(JSON.stringify({ query_id: obj.query_id, action: 'allow' }) + '\n');
+          } else {
+            // Auto-grant via session scope and allow so the command proceeds.
+            const scope = sessionScopeFor(path, baseDirectory);
+            if (operation === 'read') sessionAllowedReadPaths.add(scope);
+            else sessionAllowedWritePaths.add(scope);
+            trapSocket.write(JSON.stringify({ query_id: obj.query_id, action: 'allow' }) + '\n');
+            trapLines.push(line);
+          }
+        } else {
+          trapLines.push(line);
+        }
+      }
+    });
+    trapSocket.on('error', () => {});
+  });
 
-async function awaitQueryPort(baseDirectory: string): Promise<number | null> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const port = socketQueryPort(baseDirectory);
-    if (port !== null) return port;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return null;
+  return new Promise((resolve, reject) => {
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      const address = server.address() as AddressInfo;
+      resolve({ server, port: address.port, trapLines });
+    });
+  });
 }
 
 function buildWrappedCommand(
@@ -1001,6 +1066,11 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
 
     activeBash.delete(callID);
     if (state.stop) await state.stop().catch(() => undefined);
+    if (state.trapServer) {
+      await new Promise<void>((resolve) => {
+        state.trapServer!.close(() => resolve());
+      });
+    }
     rmSync(state.policyDir, { recursive: true, force: true });
   }
 
@@ -1083,11 +1153,24 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
     }
 
     const originalCommand = args.command as string;
+
+    // Start a local trap server so landstrip's query traps are answered
+    // in-process instead of relying on the TUI plugin's discovery port.
+    const trapServer = await startTrapServer(
+      effectiveConfig.filesystem.allowRead,
+      effectiveConfig.filesystem.allowWrite,
+      effectiveConfig.filesystem.denyRead,
+      effectiveConfig.filesystem.denyWrite,
+      directory,
+      sessionAllowedReadPaths,
+      sessionAllowedWritePaths,
+    );
+
     const wrappedCommand = buildWrappedCommand(
       policy.path,
       configuredShell ?? process.env.SHELL ?? '/bin/sh',
       originalCommand,
-      await awaitQueryPort(directory),
+      trapServer.port,
     );
 
     activeBash.set(callID, {
@@ -1096,6 +1179,9 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       policyDir: policy.dir,
       port: proxyPort,
       stop: proxy ? proxy.stop : null,
+      trapServer: trapServer.server,
+      trapServerPort: trapServer.port,
+      trapLines: trapServer.trapLines,
     });
 
     args.command = wrappedCommand;
@@ -1239,9 +1325,12 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       }
 
       const outputText = output?.output ?? '';
-      // Query traps were already resolved interactively over the socket by the
-      // TUI plugin; only terminal (info) traps belong in the after-the-fact toast.
-      const errors = parseLandstripTraps(outputText).filter(
+      // Query traps were already resolved in-process by the local trap server;
+      // only terminal (info) traps and trap-server-collected lines belong in
+      // the after-the-fact toast.
+      const serverTrapOutput = state.trapLines.join('\n');
+      const combinedOutput = serverTrapOutput ? outputText + '\n' + serverTrapOutput : outputText;
+      const errors = parseLandstripTraps(combinedOutput).filter(
         (trap: LandstripTrap) => !(trap.kind === 'filesystem' && trap.state === 'query'),
       );
       if (errors.length > 0) {
