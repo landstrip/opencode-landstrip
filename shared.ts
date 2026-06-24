@@ -195,11 +195,20 @@ export function loadConfig(
   optionOverrides: SandboxConfigOverrides,
 ): SandboxConfig {
   const { globalPath, projectPath } = getConfigPaths(baseDirectory);
+
+  if (!existsSync(globalPath)) {
+    mkdirSync(dirname(globalPath), { recursive: true });
+    writeFileSync(
+      globalPath,
+      JSON.stringify(DEFAULT_CONFIG, null, 2) + '\n',
+      'utf-8',
+    );
+  }
+
+  const globalConfig = readConfigFile(globalPath) ?? {};
+
   return deepMerge(
-    deepMerge(
-      deepMerge(DEFAULT_CONFIG, readConfigFile(globalPath) ?? {}),
-      readConfigFile(projectPath) ?? {},
-    ),
+    deepMerge(globalConfig, readConfigFile(projectPath) ?? {}),
     optionOverrides,
   );
 }
@@ -210,7 +219,7 @@ export function writeConfigFile(configPath: string, update: SandboxConfigOverrid
     throw new Error(`Config file ${configPath} is corrupted; refusing to overwrite`);
   }
 
-  const next = deepMerge(deepMerge(DEFAULT_CONFIG, current), update);
+  const next = deepMerge(current, update);
 
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, JSON.stringify(next, null, 2) + '\n');
