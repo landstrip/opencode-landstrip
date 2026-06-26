@@ -528,15 +528,38 @@ function discoveryDir(): string {
   return join(base, 'opencode-landstrip');
 }
 
-export function discoveryFilePath(baseDirectory: string): string {
+function directoryHash(baseDirectory: string): string {
   let key = baseDirectory;
   try {
     key = realpathSync.native(baseDirectory);
   } catch {
     // Directory not resolvable — hash the raw path instead.
   }
-  const hash = createHash('sha256').update(key).digest('hex').slice(0, 16);
-  return join(discoveryDir(), `port-${hash}.json`);
+  return createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
+export function discoveryFilePath(baseDirectory: string): string {
+  return join(discoveryDir(), `port-${directoryHash(baseDirectory)}.json`);
+}
+
+// /sandbox-disable pauses the sandbox per-directory. The flag lives beside the
+// discovery file so the TUI plugin (which runs the command) and the server
+// plugin (which gates wrapping) agree even though they are separate processes.
+export function disableFlagPath(baseDirectory: string): string {
+  return join(discoveryDir(), `disabled-${directoryHash(baseDirectory)}`);
+}
+
+export function setSandboxDisabled(baseDirectory: string, disabled: boolean): void {
+  if (disabled) {
+    mkdirSync(discoveryDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(disableFlagPath(baseDirectory), `${process.pid}\n`);
+  } else {
+    rmSync(disableFlagPath(baseDirectory), { force: true });
+  }
+}
+
+export function isSandboxDisabled(baseDirectory: string): boolean {
+  return existsSync(disableFlagPath(baseDirectory));
 }
 
 export function writeDiscoveryPort(baseDirectory: string, port: number): void {

@@ -30,6 +30,10 @@ async function withPlugin(options, run, mock = {}) {
 
     await mkdir(home, { recursive: true });
     await writeFile(join(tempDir, 'shared.js'), sharedCompiled);
+    await writeFile(
+      join(tempDir, 'sandbox.json'),
+      await readFile(join(root, 'sandbox.json'), 'utf8'),
+    );
     await writeFile(modulePath, compiled);
     process.env.HOME = home;
 
@@ -112,9 +116,86 @@ test('bash wrapping is idempotent for repeated before hooks', async () => {
 
         assert.equal(output.args.command, wrapped);
         assert.equal(output.args.description, 'Shows concise git status (landstrip)');
-        assert.equal(wrapped.match(/'-p'/g)?.length, 1);
+        // Single wrap emits three -p: the trapped socket branch, its bash -c
+        // fallback, and the plain fallback. Idempotency is the equality above.
+        assert.equal(wrapped.match(/'-p'/g)?.length, 3);
       } finally {
         await hooks['tool.execute.after'](input, { title: '', output: '', metadata: {} });
+      }
+    },
+  );
+});
+
+test('sandbox-disable stops wrapping and sandbox-enable resumes it', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: { allowRead: ['.'], allowWrite: ['.'], denyRead: [], denyWrite: [] },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks, messages }) => {
+      const wrap = async (callID) => {
+        const output = { args: { command: 'git status --short', description: 'd' } };
+        await hooks['tool.execute.before']({ callID, tool: 'bash' }, output);
+        await hooks['tool.execute.after'](
+          { callID, tool: 'bash', args: output.args },
+          { title: '', output: '', metadata: {} },
+        );
+        return output.args.command;
+      };
+
+      assert.notEqual(await wrap('enabled'), 'git status --short', messages.join('\n'));
+
+      await hooks['command.execute.before'](
+        { command: 'sandbox-disable', sessionID: 's', arguments: '' },
+        { parts: [] },
+      );
+      assert.equal(await wrap('disabled'), 'git status --short', 'disable must skip wrapping');
+
+      await hooks['command.execute.before'](
+        { command: 'sandbox-enable', sessionID: 's', arguments: '' },
+        { parts: [] },
+      );
+      assert.notEqual(
+        await wrap('re-enabled'),
+        'git status --short',
+        'enable must resume wrapping',
+      );
+    },
+  );
+});
+
+test('disable flag file pauses wrapping cross-process (no command hook)', async () => {
+  await withPlugin(
+    {
+      enabled: true,
+      filesystem: { allowRead: ['.'], allowWrite: ['.'], denyRead: [], denyWrite: [] },
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+    },
+    async ({ hooks, tempDir }) => {
+      const shared = await import(pathToFileURL(join(tempDir, 'shared.js')).href);
+      const wrap = async (callID) => {
+        const output = { args: { command: 'git status --short', description: 'd' } };
+        await hooks['tool.execute.before']({ callID, tool: 'bash' }, output);
+        await hooks['tool.execute.after'](
+          { callID, tool: 'bash', args: output.args },
+          { title: '', output: '', metadata: {} },
+        );
+        return output.args.command;
+      };
+
+      try {
+        assert.notEqual(await wrap('on'), 'git status --short');
+
+        // Simulate the TUI process writing the flag without the server's
+        // command hook ever firing.
+        shared.setSandboxDisabled(tempDir, true);
+        assert.equal(await wrap('off'), 'git status --short', 'flag must pause wrapping');
+
+        shared.setSandboxDisabled(tempDir, false);
+        assert.notEqual(await wrap('on-again'), 'git status --short');
+      } finally {
+        shared.setSandboxDisabled(tempDir, false);
       }
     },
   );
@@ -532,14 +613,16 @@ test('query-response: bash wrapping injects fd 3 and stays idempotent', linuxOnl
       network: { allowedDomains: ['*'], deniedDomains: [] },
     },
     async ({ hooks, tempDir }) => {
-      await withQueryServer(tempDir, async ({ port }) => {
+      await withQueryServer(tempDir, async () => {
         const input = { callID: 'query-a', tool: 'bash' };
         const output = { args: { command: 'git status --short', description: 'status' } };
         try {
           await hooks['tool.execute.before'](input, output);
           const wrapped = output.args.command;
 
-          assert.match(wrapped, new RegExp(`/dev/tcp/127\\.0\\.0\\.1/${port}\\b`));
+          // prepareBash starts its own in-process trap server and wraps against
+          // that port, so match any loopback /dev/tcp port rather than a fixed one.
+          assert.match(wrapped, /\/dev\/tcp\/127\.0\.0\.1\/\d+\b/);
           assert.match(wrapped, /'--trap-fd' '3'/);
           assert.ok(wrapped.includes(' || '), 'has the plain fallback branch');
           // Two --trap-fd (native /dev/tcp + bash -c fallback), three -p (both

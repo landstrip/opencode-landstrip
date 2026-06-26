@@ -18,6 +18,7 @@ import {
   formatLandstripTraps,
   getConfigPaths,
   isRecord,
+  isSandboxDisabled,
   landstripBinaryPath,
   loadConfig,
   normalizeOptions,
@@ -26,6 +27,7 @@ import {
   permissionType,
   sandboxSummary,
   sessionScopeFor,
+  setSandboxDisabled,
 } from './shared.js';
 
 interface LandstripPolicy {
@@ -846,6 +848,9 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
   }
   let enabledNotified = false;
   let sandboxDisabled = false;
+  // A previous session may have left a disable flag for this directory; start
+  // enabled so /sandbox-disable stays scoped to the current session.
+  setSandboxDisabled(directory, false);
   let configuredShell: string | undefined;
   let landstripCheck: { ok: true; version: string } | { ok: false; reason: string } | undefined;
 
@@ -899,7 +904,8 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
 
   function buildSandboxSummary(config: SandboxConfig): string {
     const { globalPath, projectPath } = getConfigPaths(directory);
-    const statusText = sandboxDisabled ? 'disabled for this session' : undefined;
+    const statusText =
+      sandboxDisabled || isSandboxDisabled(directory) ? 'disabled for this session' : undefined;
     const report = sandboxSummary(config, globalPath, projectPath, statusText);
     return ['# Sandbox Configuration', '', report].join('\n');
   }
@@ -1004,7 +1010,9 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
   }
 
   async function activeConfig(): Promise<SandboxConfig | null> {
-    if (sandboxDisabled) return null;
+    // The flag file lets the TUI plugin pause the sandbox cross-process; the
+    // in-memory bool covers the server's own command path.
+    if (sandboxDisabled || isSandboxDisabled(directory)) return null;
 
     const config = loadConfig(directory, optionOverrides);
     if (!config.enabled) {
@@ -1392,7 +1400,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       }
 
       if (command === 'sandbox-disable') {
-        if (sandboxDisabled) {
+        if (sandboxDisabled || isSandboxDisabled(directory)) {
           pushCommandText(
             input,
             output,
@@ -1401,6 +1409,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
           return;
         }
         sandboxDisabled = true;
+        setSandboxDisabled(directory, true);
         pushCommandText(
           input,
           output,
@@ -1419,7 +1428,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
       }
 
       if (command === 'sandbox-enable') {
-        if (!sandboxDisabled) {
+        if (!sandboxDisabled && !isSandboxDisabled(directory)) {
           pushCommandText(
             input,
             output,
@@ -1428,6 +1437,7 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
           return;
         }
         sandboxDisabled = false;
+        setSandboxDisabled(directory, false);
         const config = await activeConfig();
         if (!config) {
           pushCommandText(

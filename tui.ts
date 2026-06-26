@@ -15,6 +15,7 @@ import {
   sessionAllows,
   sandboxSummary,
   sessionScopeFor,
+  setSandboxDisabled,
   updateForPermission,
   writeConfigFile,
   writeDiscoveryPort,
@@ -464,8 +465,18 @@ const tui: TuiPlugin = async (api, options, meta) => {
     );
   };
 
-  const executeServerCommand = async (command: string): Promise<boolean> => {
-    await api.client.tui.executeCommand({ command: `/${command}` });
+  // Toggle the per-directory disable flag directly. The server plugin gates
+  // wrapping on this flag, so disabling works without depending on a command
+  // round-trip reaching the server's command hook.
+  const setSandbox = (disabled: boolean): boolean => {
+    setSandboxDisabled(api.state.path.directory || process.cwd(), disabled);
+    api.ui.toast({
+      title: 'Sandbox',
+      message: disabled
+        ? 'Sandbox disabled for this session. Use /sandbox-enable to re-enable.'
+        : 'Sandbox re-enabled.',
+      variant: disabled ? 'warning' : 'success',
+    });
     return true;
   };
 
@@ -491,7 +502,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
         suggested: true,
         slash: { name: 'sandbox-disable' },
         slashName: 'sandbox-disable',
-        run: () => executeServerCommand('sandbox-disable'),
+        run: () => setSandbox(true),
       },
       {
         namespace: 'palette',
@@ -502,7 +513,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
         suggested: true,
         slash: { name: 'sandbox-enable' },
         slashName: 'sandbox-enable',
-        run: () => executeServerCommand('sandbox-enable'),
+        run: () => setSandbox(false),
       },
     ],
   });
@@ -524,7 +535,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
       category: 'Sandbox',
       suggested: true,
       slash: { name: 'sandbox-disable' },
-      onSelect: () => executeServerCommand('sandbox-disable'),
+      onSelect: () => setSandbox(true),
     },
     {
       title: 'Enable sandbox',
@@ -533,7 +544,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
       category: 'Sandbox',
       suggested: true,
       slash: { name: 'sandbox-enable' },
-      onSelect: () => executeServerCommand('sandbox-enable'),
+      onSelect: () => setSandbox(false),
     },
   ]);
 
