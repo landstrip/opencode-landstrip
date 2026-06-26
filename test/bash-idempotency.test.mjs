@@ -272,7 +272,7 @@ test('permission.ask can approve one edit call outside allowWrite', async () => 
   );
 });
 
-test('permission.ask deny is not remembered as a read allowance', async () => {
+test('a denyRead read asks for approval instead of hard-denying', async () => {
   await withPlugin(
     {
       enabled: true,
@@ -293,7 +293,7 @@ test('permission.ask deny is not remembered as a read allowance', async () => {
           id: 'permission-read',
           type: 'read',
           pattern: filepath,
-          callID: 'read-call',
+          callID: 'read-ask',
           sessionID: 'session',
           messageID: 'message',
           title: 'Read file',
@@ -303,13 +303,17 @@ test('permission.ask deny is not remembered as a read allowance', async () => {
         permissionOutput,
       );
 
-      assert.equal(permissionOutput.status, 'deny');
+      // A read under denyRead prompts (allow once/session/persist or reject)
+      // rather than being denied outright.
+      assert.equal(permissionOutput.status, 'ask');
+
+      // Until it is approved, the read tool still blocks the access.
       await assert.rejects(
         hooks['tool.execute.before'](
-          { callID: 'read-call', tool: 'read' },
+          { callID: 'read-unapproved', tool: 'read' },
           { args: { path: filepath } },
         ),
-        /read access denied/,
+        /requires approval/,
       );
     },
   );
@@ -495,7 +499,7 @@ test('deny overrides allow when a path matches both lists', async () => {
           id: 'permission-read',
           type: 'read',
           pattern: filepath,
-          callID: 'read-call',
+          callID: 'read-ask',
           sessionID: 'session',
           messageID: 'message',
           title: 'Read file',
@@ -504,13 +508,15 @@ test('deny overrides allow when a path matches both lists', async () => {
         },
         readOutput,
       );
-      assert.equal(readOutput.status, 'deny');
+      // A read shadowed by a more specific denyRead prompts rather than being
+      // silently allowed by the broader allowRead — and writes still hard-deny.
+      assert.equal(readOutput.status, 'ask');
       await assert.rejects(
         hooks['tool.execute.before'](
-          { callID: 'read-call', tool: 'read' },
+          { callID: 'read-unapproved', tool: 'read' },
           { args: { path: filepath } },
         ),
-        /read access denied/,
+        /requires approval/,
       );
 
       await assert.rejects(
@@ -577,13 +583,14 @@ test('a broad denyRead does not block reads inside an allowed project', async ()
         ),
       );
 
-      // A path outside the project but under the same denyRead stays blocked.
+      // A path outside the project but under the same denyRead needs approval:
+      // an unapproved read is blocked rather than hard-denied.
       await assert.rejects(
         hooks['tool.execute.before'](
           { callID: 'read-outside', tool: 'read' },
           { args: { path: join(tmpdir(), 'opencode-landstrip-elsewhere', 'secret') } },
         ),
-        /read access denied/,
+        /requires approval/,
       );
     },
   );

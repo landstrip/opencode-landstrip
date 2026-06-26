@@ -287,19 +287,12 @@ function evaluateReadPermission(
   const allowDepth = matchDepth(filePath, effectiveAllowRead, baseDirectory);
   const denyDepth = matchDepth(filePath, config.filesystem.denyRead, baseDirectory);
 
-  // The most specific rule wins, matching landstrip's read policy so the bash
-  // and read tools agree: a denyRead overrides allowRead only when it is more
-  // specific, while a tie or a more specific allowRead carves the path back in.
-  if (denyDepth > allowDepth) {
-    return {
-      status: 'deny',
-      kind: 'read',
-      resource: filePath,
-      message: `Sandbox: read access denied for "${filePath}" (denyRead overrides allowRead).`,
-    };
-  }
-
-  if (allowDepth >= 0) {
+  // Reads are interactive, so the read tool never hard-denies: a path covered by
+  // allowRead at least as specifically as any denyRead is allowed silently;
+  // everything else asks for approval (allow once/session/persist or reject)
+  // rather than being blocked outright. denyRead still hard-applies to bash
+  // through the landstrip binary policy, which has no way to prompt.
+  if (allowDepth >= 0 && allowDepth >= denyDepth) {
     return { status: 'allow', kind: 'read', resource: filePath, message: '' };
   }
 
@@ -307,7 +300,7 @@ function evaluateReadPermission(
     status: 'ask',
     kind: 'read',
     resource: filePath,
-    message: `Sandbox: read access requires approval for "${filePath}" (not in filesystem.allowRead).`,
+    message: `Sandbox: read access requires approval for "${filePath}".`,
   };
 }
 
