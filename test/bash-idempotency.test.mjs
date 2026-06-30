@@ -60,7 +60,9 @@ async function withPlugin(options, run, mock = {}) {
       `export function binaryPath() { return ${JSON.stringify(fakeLandstrip)}; }`,
     );
 
-    const { default: plugin } = await import(pathToFileURL(modulePath).href);
+    const {
+      default: { server: plugin },
+    } = await import(pathToFileURL(modulePath).href);
     const messages = [];
     const hooks = await plugin(
       {

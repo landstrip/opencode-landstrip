@@ -1419,4 +1419,4 @@ const plugin: Plugin = async ({ client, directory }: PluginInput, options?: Plug
   return hooks;
 };
 
-export default plugin;
+export default { server: plugin };
